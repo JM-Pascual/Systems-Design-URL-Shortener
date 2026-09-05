@@ -1,18 +1,28 @@
 # URL Shortener — A Systems Design Class
 
-A teaching repository that builds one system — a URL shortener — **eight times**,
-each version fixing a failure mode the previous one exhibits.
+This course builds one system — a URL shortener — **eight times over**. Each
+version is broken in a specific, demonstrable way, and the next one exists to
+fix it.
 
-The rule for the whole repo: *no solution is introduced before the problem it
-solves has been felt.* Every tier starts with a demo, a load test, or a
-discussion question that makes the previous tier hurt.
+We teach it this way because the alternative does not stick. A course that
+presents hash tables, then caching, then sharding as a sequence of topics leaves
+students able to define each one and unable to say when to reach for it. Here,
+nothing is introduced until the previous version of the system has visibly
+failed without it — in a load test, a bug demo, or a question nobody in the room
+can answer.
+
+So the rule for the whole repository is: **no solution before the problem has
+been felt.**
 
 **Language:** Rust (edition 2024, toolchain pinned in `rust-toolchain.toml`).
 **Infrastructure:** Docker Compose, from Tier 3 onward.
 
 ---
 
-## The narrative
+## The course, tier by tier
+
+Read the right-hand column as the syllabus: it is the reason each session
+exists.
 
 | Tier | Adds | Because the previous tier… |
 |---|---|---|
@@ -25,7 +35,7 @@ discussion question that makes the previous tier hurt.
 | **6** — Availability | Replication, consistent hashing, sharding. | …has one Redis and one Postgres — both single points of failure. |
 | **7** — Analytics *(optional)* | Async click pipeline, rate limiting, Bloom filters. | …logs clicks inside the redirect latency budget. |
 
-⭐ Tier 4 is the centerpiece. Budget the most class time there.
+⭐ Tier 4 is the centerpiece.
 
 ---
 
@@ -67,18 +77,35 @@ cargo fmt --all                   # format
 From Tier 3 onward each tier ships a `docker-compose.yml` for its Postgres and
 Redis; `docker compose up -d` inside the tier folder is all that is needed.
 
-### For students
+---
 
-The tiers ship as **skeletons**: types, signatures, tests, and detailed
-step-by-step comments are provided; the function bodies are `todo!()` and are
-yours to write. `cargo test -p tier-N-...` is your progress bar.
+## How a session runs
 
-### For instructors
+Each tier is roughly one session, and each session has the same three beats.
 
-Each tier's README ends with discussion questions intended to be asked *before*
-revealing that tier's solution. Where a tier demonstrates a failure mode, the
-`demo/` folder contains a "before" script that reproduces it and an "after"
-script that shows the fix.
+**1. Break the previous tier.** Start with the demo or the discussion questions
+at the end of the previous README — a load test that falls over, a server
+restart that loses every link, two app servers handing out the same code. The
+failure has to be seen before it is explained.
+
+**2. Work out the fix together.** The tier's own README has the argument: what
+changed, what it costs, and which requirement from Tier 0 it is paying for. The
+discussion questions are meant to be asked *before* the answer is on screen.
+
+**3. Write the code.** Tiers ship as **skeletons** — types, signatures, tests
+and step-by-step comments are given; the function bodies are `todo!()` and are
+yours. `cargo test -p tier-N-...` is the progress bar: it starts red and you are
+done when it is green.
+
+Where a tier demonstrates a failure mode, its `demo/` folder holds a "before"
+script that reproduces the failure and an "after" script that shows the fix, so
+the same thing can be run live or worked through alone afterwards.
+
+Two habits are worth carrying through all eight tiers. First: whenever a piece
+of infrastructure appears, name the Tier 0 requirement it is paying for — if you
+cannot, go back. Second: prefer the smallest version of a fix that makes the
+demo pass, then ask what it costs. Most of the interesting material in this
+course lives in that second question.
 
 ---
 
