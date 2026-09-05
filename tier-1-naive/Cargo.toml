@@ -1,0 +1,12 @@
+[package]
+name = "tier-1-naive"
+version = "0.1.0"
+# `edition` and `rust-version` are inherited from the workspace root so all
+# tiers stay in lockstep. This is what `.workspace = true` means.
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true

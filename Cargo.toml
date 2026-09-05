@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Cargo *workspace* root.
+#
+# A workspace is a set of crates that share one `target/` directory and one
+# `Cargo.lock`. That means: compile artifacts and dependency versions are
+# shared across all tiers, so `cargo build` at the root builds every tier and
+# a crate you already compiled for tier-1 is not recompiled for tier-2.
+#
+# Each tier is a member crate. Tiers deliberately DO NOT depend on each other:
+# every tier is a self-contained, readable copy of the previous one plus the
+# new idea it teaches. Duplication is the point -- a student should be able to
+# read `tier-4-caching/` top to bottom without jumping between crates, and an
+# instructor should be able to `diff -r tier-3-persistence tier-4-caching` to
+# show exactly what the tier introduced.
+# ---------------------------------------------------------------------------
+[workspace]
+resolver = "3"
+members = [
+    "tier-1-naive",
+]
+
+# Dependency versions are declared once here and inherited by member crates
+# with `foo.workspace = true`. Keeps every tier on the same axum/tokio.
+[workspace.dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"

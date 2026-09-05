@@ -1,0 +1,6 @@
+# Pins the toolchain so every student in the class compiles with the same
+# compiler. rustup reads this file automatically and will install the
+# toolchain on first `cargo` invocation inside this repo.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
