@@ -6,11 +6,9 @@
 //! cargo run -p tier-1-naive
 //! ```
 //!
-//! The HTTP layer here is deliberately thin: it exists so every tier of the
-//! class is `curl`-able and load-testable, and so the diff between tiers shows
-//! the idea being taught rather than a web server appearing out of nowhere.
 
 mod base62;
+mod config;
 mod store;
 
 use std::sync::{Arc, Mutex};
@@ -24,6 +22,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use config::Config;
 use store::Store;
 
 /// Shared application state.
@@ -45,6 +44,9 @@ use store::Store;
 /// let readers proceed in parallel — a good one-line exercise.)
 struct AppState {
     store: Mutex<Store>,
+    /// Read once at startup and never mutated, so it needs no `Mutex` — the
+    /// `Arc` alone is enough to share an immutable value across threads.
+    config: Config,
 }
 
 /// Request body for `POST /shorten`.
@@ -83,11 +85,11 @@ async fn shorten(
     // ^ The `MutexGuard` is a temporary within this statement, so the lock is
     //   released right here — not held while we build the response below.
 
-    // `format!` only borrows `code`, so listing `short_url` first lets us then
-    // *move* `code` into the struct without a clone. Struct field order in a
-    // literal does not have to match the declaration.
+    // `short_url` first so that `code` is still borrowable here, and can then
+    // be *moved* into the struct on the next line without a clone. Struct field
+    // order in a literal does not have to match the declaration.
     let body = ShortenResponse {
-        short_url: format!("http://localhost:3000/{code}"),
+        short_url: state.config.short_url(&code),
         code,
     };
 
@@ -133,8 +135,13 @@ async fn stats(State(state): State<Arc<AppState>>) -> String {
 /// await point.)
 #[tokio::main]
 async fn main() {
+    // Read config before binding the socket: a misconfigured process should
+    // fail immediately rather than after it has started accepting requests.
+    let config = Config::from_env();
+
     let state = Arc::new(AppState {
         store: Mutex::new(Store::new()),
+        config,
     });
 
     let app = Router::new()
@@ -145,13 +152,26 @@ async fn main() {
         // order. Worth knowing, but not worth relying on: it is why real
         // shorteners put management endpoints under a prefix like `/api/`.
         .route("/{code}", get(redirect))
-        .with_state(state);
+        // `with_state` takes the state *by value*, so handing it `state`
+        // directly would move it and the `println!` below could no longer read
+        // `state.config`. `Arc::clone` hands the router its own handle to the
+        // same allocation — it copies a pointer and bumps a refcount, not the
+        // `AppState`. Writing `Arc::clone(&state)` rather than `state.clone()`
+        // is a common convention: it makes the cheapness explicit at the call
+        // site, since `.clone()` on a field could mean a deep copy.
+        .with_state(Arc::clone(&state));
 
+    // The *listen* address stays fixed while `BASE_URL` varies. They are
+    // genuinely different things: behind a proxy this process listens on
+    // 0.0.0.0:3000 while users see `https://sho.rt`. Conflating them is a
+    // common source of links that work locally and break in deployment.
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
         .expect("port 3000 already in use?");
 
-    println!("tier-1-naive listening on http://localhost:3000");
+    println!("tier-1-naive listening on 0.0.0.0:3000");
+    println!("minting short URLs as {}/{{code}}", state.config.base_url);
+    println!();
     println!("  curl -X POST localhost:3000/shorten -H 'content-type: application/json' \\");
     println!("       -d '{{\"url\":\"https://example.com\"}}'");
     println!("  curl -i localhost:3000/0");

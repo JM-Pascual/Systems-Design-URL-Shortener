@@ -225,6 +225,14 @@ cargo clippy --workspace
 cargo fmt --all
 ```
 
+Short URLs are minted against `BASE_URL` (default `http://localhost:3000`). It
+is the public origin users see, which behind a proxy differs from the address
+the process binds to:
+
+```bash
+BASE_URL=https://sho.rt cargo run -p tier-1-naive
+```
+
 From the third iteration on, each folder ships a `docker-compose.yml` for its
 Postgres and Redis; `docker compose up -d` inside the folder is enough.
 

@@ -32,6 +32,10 @@ GET  /stats                     ->  "N links"
 ```bash
 cargo run -p tier-1-naive
 
+# short URLs default to http://localhost:3000/{code}; override the public
+# origin (the address users see, not the port the server binds) with:
+BASE_URL=https://sho.rt cargo run -p tier-1-naive
+
 # in another shell
 curl -X POST localhost:3000/shorten \
      -H 'content-type: application/json' \
@@ -45,7 +49,7 @@ curl -i localhost:3000/0
 
 ## Your implementation tasks
 
-Four `todo!()`s. Run `cargo test -p tier-1-naive` — everything fails until you
+Five `todo!()`s. Run `cargo test -p tier-1-naive` — everything fails until you
 fill them in, and passes when you are done.
 
 | File | Function | Teaches |
@@ -54,6 +58,7 @@ fill them in, and passes when you are done.
 | `src/base62.rs` | `decode` | Horner's method; checked arithmetic; custom error types |
 | `src/store.rs` | `shorten` | ownership: taking `String` by value to store it |
 | `src/store.rs` | `resolve` | why you clone out of a `Mutex` instead of returning `&str` |
+| `src/config.rs` | `Config::from_env` | reading env vars; `unwrap_or_else` vs `unwrap_or`; borrows that outlive a local |
 
 Each `todo!()` has a step-by-step comment above it, including the Rust-specific
 notes. Read the comment, write the body, delete the `let _ = ...;` line above it.

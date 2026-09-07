@@ -10,11 +10,10 @@
 //! * base10 (`"1234567"`)  -> 10 symbols/char, long codes.
 //! * base16 (`"12D687"`)   -> 16 symbols/char.
 //! * base62 (`"5BAA"`)     -> 62 symbols/char, ~1.7x shorter than base16.
-//! * base64                -> 64 symbols, but includes `+` and `/`, which are
-//!                            *not* URL-safe. (There is a "URL-safe base64"
-//!                            variant using `-` and `_`; we avoid it because
-//!                            `-` and `_` are easy to mangle when a link is
-//!                            read aloud or line-wrapped in an email.)
+//! * base64 -> 64 symbols, but includes `+` and `/`, which are *not* URL-safe.
+//!   (There is a "URL-safe base64" variant using `-` and `_`; we avoid it
+//!   because both are easy to mangle when a link is read aloud or line-wrapped
+//!   in an email.)
 //!
 //! # base62 is an ENCODING, not a HASH
 //!
