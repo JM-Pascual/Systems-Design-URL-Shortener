@@ -125,4 +125,4 @@ next two tiers.
    how much throughput would you expect that to buy?
 
 **Previous:** [Tier 0 — Requirements](../tier-0-requirements/README.md) ·
-**Next:** Tier 2 — Code Generation and Collisions
+**Next:** [Tier 2 — Code Generation and Collisions](../tier-2-collisions/README.md)

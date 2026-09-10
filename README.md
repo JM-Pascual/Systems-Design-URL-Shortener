@@ -81,7 +81,7 @@ counter and issues duplicate codes; bounded by RAM; codes are enumerable.
 
 ---
 
-## Second iteration — code generation and collisions
+## Second iteration — [code generation and collisions](tier-2-collisions/)
 
 Two competing schemes, compared directly.
 
