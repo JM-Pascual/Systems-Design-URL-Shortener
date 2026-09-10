@@ -117,7 +117,7 @@ query.
 
 ---
 
-## Fourth iteration — caching with Redis ⭐
+## Fourth iteration — [caching with Redis](tier-4.1-caching/) ⭐
 
 The centerpiece. Budget the most time here.
 
@@ -209,7 +209,7 @@ tier-N-.../
 
 Iterations do not depend on each other. Each is a full copy of the previous one
 plus the new idea, so a folder reads standalone and
-`diff -ru tier-3-persistence tier-4-caching` shows exactly what an iteration
+`diff -ru tier-3-persistence tier-4.1-caching` shows exactly what an iteration
 introduced.
 
 ## Running the code

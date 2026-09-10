@@ -2,8 +2,8 @@
 //! Tier 3's Postgres as a cache-aside layer. Run it with:
 //!
 //! ```text
-//! docker compose -f tier-4-caching/docker-compose.yml up -d
-//! cargo run -p tier-4-caching
+//! docker compose -f tier-4.1-caching/docker-compose.yml up -d
+//! cargo run -p tier-4-1-caching
 //! ```
 
 mod base62;
@@ -149,7 +149,7 @@ async fn main() {
         .await
         .expect("port 3000 already in use?");
 
-    println!("tier-4-caching listening on 0.0.0.0:3000");
+    println!("tier-4.1-caching listening on 0.0.0.0:3000");
     println!("minting short URLs as {}/{{code}}", state.config.base_url);
     println!();
     println!("  curl -X POST localhost:3000/shorten -H 'content-type: application/json' \\");

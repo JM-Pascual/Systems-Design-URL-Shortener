@@ -153,7 +153,7 @@ mod tests {
     /// These tests need real Postgres and Redis reachable at `DATABASE_URL`
     /// / `REDIS_URL` (see `../docker-compose.yml`) and are marked `#[ignore]`
     /// so `cargo test` stays usable without either. Run them explicitly:
-    /// `cargo test -p tier-4-caching -- --ignored`
+    /// `cargo test -p tier-4-1-caching -- --ignored`
     async fn test_store() -> Store {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://shortener:shortener@localhost:5434/shortener".into());

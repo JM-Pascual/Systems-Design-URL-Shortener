@@ -112,4 +112,4 @@ network overhead to the database is even counted.
    own?
 
 **Previous:** [Tier 2 — Code Generation and Collisions](../tier-2-collisions/README.md) ·
-**Next:** Tier 4 — Caching with Redis
+**Next:** [Tier 4 — Caching with Redis](../tier-4.1-caching/README.md)

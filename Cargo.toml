@@ -9,8 +9,8 @@
 # Each tier is a member crate. Tiers deliberately DO NOT depend on each other:
 # every tier is a self-contained, readable copy of the previous one plus the
 # new idea it teaches. Duplication is the point -- a student should be able to
-# read `tier-4-caching/` top to bottom without jumping between crates, and an
-# instructor should be able to `diff -r tier-3-persistence tier-4-caching` to
+# read `tier-4.1-caching/` top to bottom without jumping between crates, and an
+# instructor should be able to `diff -r tier-3-persistence tier-4.1-caching` to
 # show exactly what the tier introduced.
 # ---------------------------------------------------------------------------
 [workspace]
@@ -18,7 +18,7 @@ resolver = "3"
 members = [
     "tier-1-naive",
     "tier-3-persistence",
-    "tier-4-caching",
+    "tier-4.1-caching",
 ]
 
 # Dependency versions are declared once here and inherited by member crates
