@@ -17,6 +17,7 @@
 resolver = "3"
 members = [
     "tier-1-naive",
+    "tier-3-persistence",
 ]
 
 # Dependency versions are declared once here and inherited by member crates
@@ -25,6 +26,8 @@ members = [
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "migrate"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [workspace.package]
 edition = "2024"
