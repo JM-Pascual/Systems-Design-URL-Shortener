@@ -104,7 +104,7 @@ servers (deferred to the fifth iteration).
 
 ---
 
-## Third iteration — persistence
+## Third iteration — [persistence](tier-3-persistence/)
 
 Moves the map into Postgres. Schema: `code (PK), long_url, created_at,
 expires_at, user_id`.

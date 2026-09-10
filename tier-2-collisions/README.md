@@ -124,4 +124,4 @@ tackles a different way.
    for this system's codes?
 
 **Previous:** [Tier 1 — Naive Single-Server Solution](../tier-1-naive/README.md) ·
-**Next:** Tier 3 — Persistence
+**Next:** [Tier 3 — Persistence](../tier-3-persistence/README.md)
