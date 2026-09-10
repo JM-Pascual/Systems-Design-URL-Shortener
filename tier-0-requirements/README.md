@@ -1,4 +1,5 @@
 # Tier 0 — Requirements Gathering
+
 ---
 
 ## What this session is for
@@ -21,9 +22,7 @@ time on it in §3.3.
 
 > "Design a URL shortener, like bit.ly or tinyurl."
 
-That sentence is under-specified on purpose — real ones always are. A ticket, a
-product brief, or a professor's prompt all arrive in roughly this shape, and the
-first engineering act is to turn it into a contract. We do that in two passes:
+The first engineering act is to turn this proposed exercise it into a contract. We do that in two passes:
 functional, then non-functional.
 
 ---
@@ -49,10 +48,7 @@ POST /shorten      {"url": "https://example.com/a/very/long/path"}
 GET  /1a        -> 307 Location: https://example.com/a/very/long/path
 ```
 
-Two operations. That is the whole product. Hold on to how small this list is —
-by Tier 6 we will have replication, sharding, and a cache hierarchy behind
-exactly these two calls, and it is worth being able to point back at the
-smallness.
+Two operations. That is the whole product.
 
 ### Optional (deferred, but designed for)
 
@@ -66,14 +62,6 @@ you know is coming changes the design you choose today.
 | Edit destination — `PATCH /{code}` | **The important one.** It is the trigger for the cache-invalidation and thundering-herd work in Tier 4, and the reason we pick counter-based codes over hash-based ones in Tier 2. |
 | Delete / disable — `DELETE /{code}` | Same, plus it raises a genuinely hard question: what does a cache *hit* mean when the underlying row is gone? |
 | Click analytics — unique visitor counts | Motivates HyperLogLog (Tier 4) and the asynchronous pipeline (Tier 7). |
-
-### Explicitly out of scope
-
-User accounts and authentication, a web UI, billing.
-
-Writing down what we are *not* building is not padding. It is how a scope stays
-fixed for the ten weeks of the course, and it is the difference between a
-decision and an omission.
 
 ---
 
@@ -109,10 +97,6 @@ handles it without noticing. 4 000 reads/sec against a disk-backed B-tree is
 where it starts to hurt. **That gap is the course.** Tiers 3 through 6 are all
 attempts to close it.
 
-*In class:* do this estimate on the board before showing the numbers. Students
-should practise picking a plausible input (100M/month) and defending it, rather
-than deriving one true answer.
-
 ### 3.2 Redirect latency is in a human's critical path
 
 A redirect sits between someone clicking a link and the page loading. Budget:
@@ -136,10 +120,6 @@ In CAP terms: when the network partitions, we keep serving.
 That first bullet is the licence for everything in Tier 4, up to and including
 deliberately serving expired data while a refresh runs in the background
 (*stale-while-revalidate*). Without it, half of Tier 4 would be indefensible.
-
-*Worth doing in class:* take the same two bullets and rewrite them for a bank
-ledger, where the answers invert. Then ask which parts of Tiers 4 and 6 survive
-the rewrite. This is usually the moment CAP stops being a slogan.
 
 ### 3.4 Codes must be unique, and ideally not guessable
 
@@ -207,8 +187,5 @@ technology's own merits.
 | More than one app server (§3.1) | Tier 5 — distributed ID generation |
 | Availability over consistency (§3.3) | Tier 6 — replication, partitioning |
 | Redirect latency budget (§3.2) | Tier 7 — async analytics, rate limiting |
-
-If at any point in the course you cannot name the row of this table that a piece
-of infrastructure is paying for, that is a sign to stop and go back to it.
 
 **Next:** [Tier 1 — Naive Single-Server Solution](../tier-1-naive/README.md)

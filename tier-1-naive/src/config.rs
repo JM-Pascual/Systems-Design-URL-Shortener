@@ -48,43 +48,11 @@ impl Config {
     /// BASE_URL="https://sho.rt"    -> "https://sho.rt"
     /// BASE_URL="https://sho.rt/"   -> "https://sho.rt"     (slash trimmed)
     /// ```
-    ///
-    /// # TODO(you): implement this
-    ///
-    /// 1. Read the `BASE_URL` variable with [`std::env::var`].
-    /// 2. If it is missing (or unreadable), fall back to [`DEFAULT_BASE_URL`].
-    /// 3. Strip any trailing `/` so the stored value never ends in one.
-    /// 4. Build and return the `Config`.
-    ///
-    /// # Rust notes
-    ///
-    /// * `std::env::var("BASE_URL")` returns `Result<String, VarError>` — it
-    ///   fails both when the variable is absent and when it is not valid
-    ///   Unicode. We do not care which, so collapse the `Result` with
-    ///   `.unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())`.
-    ///
-    ///   Why `unwrap_or_else` and not `unwrap_or`? `unwrap_or` evaluates its
-    ///   argument eagerly, allocating the fallback `String` on every call even
-    ///   when the variable *is* set. `unwrap_or_else` takes a closure and only
-    ///   runs it on the error path. With a `&str` constant the difference is
-    ///   negligible, but the habit matters once the fallback is expensive.
-    ///
-    /// * To drop a trailing slash: `s.trim_end_matches('/')` returns a `&str`
-    ///   borrowed from `s`. Note it strips *all* trailing slashes, so
-    ///   `"http://x//"` becomes `"http://x"` — fine here. If you want to remove
-    ///   at most one, `s.strip_suffix('/')` returns `Option<&str>`, which you
-    ///   would then `.unwrap_or(&s)`.
-    ///
-    ///   Watch the borrow: you cannot store a `&str` that borrows from a local
-    ///   `String` in a struct that outlives the function. Call `.to_string()`
-    ///   on the trimmed slice, or restructure so you trim before you own.
-    ///
-    /// * A production service would also *validate* — that the value parses as
-    ///   a URL and has an `http`/`https` scheme. We skip that here; a bad value
-    ///   produces visibly broken links rather than silent corruption, which is
-    ///   an acceptable trade for a teaching binary.
     pub fn from_env() -> Self {
-        todo!("read BASE_URL from the environment — see the steps above")
+        let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
     }
 
     /// Build the public short URL for a code.

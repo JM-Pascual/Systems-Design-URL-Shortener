@@ -73,65 +73,16 @@ impl Store {
     }
 
     /// Store a long URL and return the freshly minted short code.
-    ///
-    /// # TODO(you): implement this
-    ///
-    /// 1. Encode `self.next_id` with [`base62::encode`] to get the code.
-    /// 2. Advance `self.next_id` by 1.
-    /// 3. Insert `code -> url` into `self.urls`.
-    /// 4. Return the code.
-    ///
-    /// # Rust notes
-    ///
-    /// * `url: String` is taken **by value**. The caller gives up ownership and
-    ///   we move it straight into the map — no copy. If we took `&str` we would
-    ///   have to call `.to_string()` ourselves, which allocates anyway; taking
-    ///   `String` pushes that decision to the caller. This is the standard Rust
-    ///   trade-off: take `&str` when you only need to *read*, take `String`
-    ///   when you intend to *store*.
-    /// * You will need the code twice — once as the map key, once as the return
-    ///   value. `HashMap::insert` takes the key by value, so pass `code.clone()`
-    ///   as the key and return `code` (or insert `code` and return the clone).
-    ///   One small allocation; readability wins over avoiding it here.
-    /// * `HashMap::insert` returns `Option<String>` — the *previous* value, if
-    ///   the key was already present. Here it is always `None` because the
-    ///   counter never repeats, so ignore it. (In Tier 2 Path B, that return
-    ///   value is exactly how you detect a collision!)
     pub fn shorten(&mut self, url: String) -> String {
-        let _ = (&mut self.next_id, url); // remove once implemented
-        todo!("implement shorten — see the steps above")
+        let code = base62::encode(self.next_id);
+        self.next_id += 1;
+        self.urls.insert(code.clone(), url);
+        code
     }
 
     /// Look up the long URL for a code.
-    ///
-    /// # TODO(you): implement this
-    ///
-    /// One line: get `code` from `self.urls` and turn `Option<&String>` into
-    /// `Option<String>`.
-    ///
-    /// # Rust notes: why clone, and why not return `Option<&str>`?
-    ///
-    /// Returning a reference would be cheaper, and in a single-threaded program
-    /// it is what you would write. But in `main.rs` this store lives behind a
-    /// `Mutex`, and a caller does:
-    ///
-    /// ```ignore
-    /// let url = state.store.lock().unwrap().resolve(&code);
-    /// ```
-    ///
-    /// The `MutexGuard` returned by `lock()` is a temporary that is dropped at
-    /// the end of that statement — and a `&str` borrowed from inside it cannot
-    /// outlive it. The borrow checker will reject it. Cloning the `String`
-    /// gives the caller an owned value that outlives the lock, and — just as
-    /// importantly — lets us *release the lock immediately* instead of holding
-    /// it while we write an HTTP response. Cloning a ~60-byte URL is far
-    /// cheaper than serialising every request behind a held lock.
-    ///
-    /// `Option` has combinators for exactly this: `.cloned()` on an
-    /// `Option<&T>` where `T: Clone`, or `.map(|s| s.clone())`.
     pub fn resolve(&self, code: &str) -> Option<String> {
-        let _ = (&self.urls, code); // remove once implemented
-        todo!("implement resolve — see the note above")
+        self.urls.get(code).cloned()
     }
 
     /// How many links exist. Used by the `/stats` endpoint and by tests.

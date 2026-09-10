@@ -66,42 +66,21 @@ pub enum Base62Error {
 /// encode(62)    == "10"
 /// encode(12345) == "3d7"
 /// ```
-///
-/// # TODO(you): implement this
-///
-/// The algorithm is repeated division, the same one you would use to convert
-/// to binary by hand:
-///
-/// 1. **Special-case `n == 0`.** The loop below runs zero times for `n == 0`,
-///    which would produce an empty string. Return `"0"` instead.
-/// 2. Create an empty `Vec<u8>` to collect digit bytes.
-/// 3. While `n > 0`:
-///    - take `remainder = n % BASE` — this is the value of the *least*
-///      significant digit;
-///    - push `ALPHABET[remainder as usize]` onto the vec;
-///    - set `n = n / BASE`.
-/// 4. The digits came out least-significant-first, so **reverse** the vec.
-/// 5. Turn the bytes into a `String`.
-///
-/// # Rust notes for step 5
-///
-/// You have a `Vec<u8>` and you want a `String`. Three options, in increasing
-/// order of "should I really?":
-///
-/// * `String::from_utf8(v).expect("alphabet is ASCII")` — allocates nothing
-///   extra, validates the bytes are UTF-8. The `expect` can never fire because
-///   `ALPHABET` is pure ASCII, and ASCII is always valid UTF-8.
-/// * `v.iter().map(|&b| b as char).collect::<String>()` — also fine, and
-///   avoids the `expect`, at the cost of one extra pass.
-/// * `unsafe { String::from_utf8_unchecked(v) }` — don't. The safe version is
-///   not measurably slower here and `unsafe` in a teaching repo is a smell.
-///
-/// Note the parameter is `mut n`: taking the parameter by value and mutating
-/// the local copy is idiomatic Rust and avoids a separate `let mut` binding.
-/// `u64` is `Copy`, so the caller's variable is untouched.
 pub fn encode(mut n: u64) -> String {
-    let _ = &mut n; // remove this line once you start using `n`
-    todo!("implement base62 encoding — see the steps above")
+    if n == 0 {
+        return String::from("0")
+    }
+
+    let mut encoded_chars: Vec<u8> = Vec::new();
+    
+    while n > 0 {
+        let next_char: u8 = ALPHABET[n as usize % 62];
+        encoded_chars.push(next_char);
+        n = n / BASE
+    }
+
+    encoded_chars.reverse();
+    return String::from_utf8(encoded_chars).expect("Alphabet is ASCII"); 
 }
 
 /// Decode a base62 string back into a `u64`.
@@ -109,53 +88,20 @@ pub fn encode(mut n: u64) -> String {
 /// This is the exact inverse of [`encode`]: `decode(&encode(n)) == Ok(n)` for
 /// every `n`. That round-trip property is what the property test at the bottom
 /// of this file checks.
-///
-/// # TODO(you): implement this
-///
-/// The algorithm is Horner's method — accumulate left to right:
-///
-/// 1. Start with `let mut n: u64 = 0;`
-/// 2. For each byte `b` of the input (`s.bytes()`):
-///    - find its digit value: the index of `b` in `ALPHABET`;
-///    - if it is not in the alphabet, return
-///      `Err(Base62Error::InvalidCharacter(b as char))`;
-///    - `n = n * BASE + value`.
-/// 3. Return `Ok(n)`.
-///
-/// # Handling overflow (step 2)
-///
-/// `n * BASE + value` will panic in debug builds and silently wrap in release
-/// builds if it exceeds `u64::MAX`. Silently wrapping means a bogus 20-character
-/// code would resolve to some *valid* short code's URL — a real bug. Use the
-/// checked arithmetic methods, which return `Option`:
-///
-/// ```ignore
-/// n = n.checked_mul(BASE)
-///      .and_then(|x| x.checked_add(value))
-///      .ok_or(Base62Error::Overflow)?;
-/// ```
-///
-/// Read that as: try to multiply; if that worked, try to add; if either step
-/// overflowed we have `None`, so turn it into our error and bail out with `?`.
-///
-/// # Rust notes
-///
-/// * To find a byte's index in the alphabet:
-///   `ALPHABET.iter().position(|&a| a == b)` returns `Option<usize>`.
-///   (This is a linear scan over 62 bytes. Fine here. If you want to make it
-///   O(1), build a 256-entry reverse-lookup table as a `const` — a good
-///   optional exercise.)
-/// * Prefer `s.bytes()` over `s.chars()`: our alphabet is ASCII, and iterating
-///   bytes sidesteps the "a `char` is a Unicode scalar value, not a byte"
-///   subtlety entirely. A multi-byte UTF-8 character will simply fail the
-///   alphabet lookup on its first byte.
-/// * What should an *empty* string decode to? Under the algorithm above the
-///   loop never runs and you get `Ok(0)`. Decide whether you are happy with
-///   that; the HTTP layer never passes an empty code, so either answer is
-///   defensible — but write a test for whichever you choose.
 pub fn decode(s: &str) -> Result<u64, Base62Error> {
-    let _ = s; // remove this line once you start using `s`
-    todo!("implement base62 decoding — see the steps above")
+    let mut n: u64 = 0;
+    for b in s.bytes() {
+        let value: u64 = match ALPHABET.iter().position(|&a| a == b) {
+            Some(idx) => idx as u64,
+            None => return Err(Base62Error::InvalidCharacter(b as char)),
+        };
+        n = n
+            .checked_mul(BASE)
+            .and_then(|x| x.checked_add(value))
+            .ok_or(Base62Error::Overflow)?;
+    }
+
+    Ok(n)
 }
 
 #[cfg(test)]

@@ -123,7 +123,7 @@ async fn redirect(
     }
 }
 
-/// `GET /stats` — how many links exist. Handy during demos.
+/// `GET /stats` — how many links exist.
 async fn stats(State(state): State<Arc<AppState>>) -> String {
     let n = state.store.lock().expect("store mutex poisoned").len();
     format!("{n} links\n")
