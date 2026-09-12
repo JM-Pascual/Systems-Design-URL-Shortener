@@ -19,6 +19,7 @@ members = [
     "tier-1-naive",
     "tier-3-persistence",
     "tier-4.1-caching",
+    "tier-4.2-caching",
 ]
 
 # Dependency versions are declared once here and inherited by member crates

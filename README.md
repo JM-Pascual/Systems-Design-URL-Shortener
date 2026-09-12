@@ -125,9 +125,11 @@ The centerpiece. Budget the most time here.
 Redis is presented as the first iteration's hash table moved onto the network and
 shared between processes.
 
-**Primitives:** `SET`/`GET`/`EXPIRE` for the mapping; `INCR` for atomic counters;
-HyperLogLog (`PFADD`/`PFCOUNT`) for unique-click estimates in constant memory;
-Bloom filters (`BF.*`) for cheap existence checks before hitting the database.
+**Primitives:** `SET`/`GET`/`EXPIRE` for the mapping; Bloom filters (`BF.*`) for
+cheap existence checks that skip Postgres on a code that was never minted.
+(`INCR` counters and HyperLogLog click estimates are analytics, not read-path
+optimization — they move to the seventh iteration, alongside the rest of the
+click-tracking pipeline.)
 
 **Eviction:** LRU, LFU, FIFO, TTL expiry, and why Zipfian access — a few URLs
 taking most of the traffic — makes caching so effective here.
@@ -189,9 +191,10 @@ hash.
 ## Seventh iteration — analytics and abuse prevention *(optional)*
 
 Click analytics pushed onto a queue so logging stays outside the redirect latency
-budget. Rate limiting in Redis via a sliding-window `ZSET` or a token bucket. A
-Bloom filter rejecting known-malicious URLs on the write path without an external
-call in the hot path.
+budget: `INCR` for a raw per-code hit counter, HyperLogLog (`PFADD`/`PFCOUNT`) for
+unique-visitor estimates in constant memory. Rate limiting in Redis via a
+sliding-window `ZSET` or a token bucket. A Bloom filter rejecting known-malicious
+URLs on the write path without an external call in the hot path.
 
 ---
 

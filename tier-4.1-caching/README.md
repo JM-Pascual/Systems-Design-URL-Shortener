@@ -1,4 +1,4 @@
-# Tier 4 — Caching with Redis
+# Tier 4.1 — Caching with Redis: Cache-Aside
 
 **Problem being solved:** Tier 3 fixed durability by moving the mapping into
 Postgres, but that traded away Tier 1's O(1) in-memory lookup for a B-tree
@@ -6,20 +6,9 @@ lookup that has to hit disk. Every redirect — Tier 0's ~99% of traffic — now
 pays that cost. This tier puts Redis in front of Postgres so most redirects
 never touch the database at all.
 
-This tier is worked through in quarters, all living in this one directory —
-unlike Tiers 1 through 3, there's no `tier-4.2-...` folder coming. The idea
-gets built up in place:
-
-1. **Cache-aside reads and write-through shorten** — implemented.
-2. Extra Redis primitives: `INCR` counters, HyperLogLog click estimates,
-   Bloom-filter existence checks.
-3. Eviction policy (LRU/LFU/FIFO/TTL) and invalidation strategy (`DEL` vs.
-   write-through) once `PATCH`/`DELETE` exist.
-4. The thundering-herd deep dive: three failure triggers, five mitigations.
-
 ---
 
-## Quarter 1: cache-aside, concretely
+## Cache-aside, concretely
 
 `resolve` (the redirect path):
 1. `GET` the code from Redis.
@@ -60,10 +49,10 @@ write clobber a fresh one.
 There is no coordination at all yet: if a hot key's TTL lapses under
 sustained load, every in-flight request misses Redis in the same instant and
 every one of them independently queries Postgres to rebuild the identical
-entry. That's quarter 4's problem to fix (distributed lock / singleflight /
-stale-while-revalidate) — building the unprotected version first is the
-right order, since the mitigation only makes sense once you've felt the
-failure it's fixing.
+entry. That's a later quarter's problem to fix (distributed lock /
+singleflight / stale-while-revalidate) — building the unprotected version
+first is the right order, since the mitigation only makes sense once you've
+felt the failure it's fixing.
 
 ---
 
@@ -71,7 +60,8 @@ failure it's fixing.
 
 | Problem | Addressed in |
 |---|---|
-| No coordination on a cache-miss stampede (thundering herd). | Quarter 4, this tier |
+| A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Tier 4.2 — Bloom filter |
+| No coordination on a cache-miss stampede (thundering herd). | A later Tier 4.N |
 | Still one counter in one process. | Tier 5 — distributed ID generation |
 
 ---
@@ -83,9 +73,9 @@ failure it's fixing.
    traffic. What would a smarter TTL policy look like, and what would it
    need to know that a flat constant doesn't?
 2. `resolve` never writes to Redis on a miss that also misses Postgres (a
-   `None` result is never cached). Real systems sometimes cache the *absence*
-   of a value too (a "negative cache"). What attack or workload would that
-   defend against here, and what's the cost of getting it wrong?
+   `None` result is never cached), so a code that was never minted pays a
+   full Postgres query on *every* request. What's a cheap way to short-
+   circuit that without caching a real value?
 3. Nothing invalidates a cached entry yet, because there's no `PATCH`/`DELETE`
    to invalidate it *for*. Once Tier 0's deferred `PATCH /{code}` exists,
    walk through what has to happen in `shorten`'s Postgres-then-Redis
@@ -100,4 +90,4 @@ failure it's fixing.
    database's query load look like once, say, 95% of reads hit cache?
 
 **Previous:** [Tier 3 — Persistence](../tier-3-persistence/README.md) ·
-**Next:** Tier 4, quarter 2 — Redis primitives (`INCR`, HyperLogLog, Bloom filters)
+**Next:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md)
