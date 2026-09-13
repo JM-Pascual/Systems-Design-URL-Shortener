@@ -119,48 +119,40 @@ query.
 
 ## Fourth iteration — [caching with Redis](tier-4.1-caching/) ⭐
 
-The centerpiece. Budget the most time here.
+The centerpiece. Unlike every other tier, it's split into quarters, each its
+own copy-forward folder — `diff -ru tier-4.1-caching tier-4.2-caching` shows
+exactly what each one adds, the same discipline as the tiers themselves.
 
-**Cache-aside:** `GET` from Redis; on a miss, read Postgres and `SET` with a TTL.
-Redis is presented as the first iteration's hash table moved onto the network and
-shared between processes.
+- **[4.1 — cache-aside](tier-4.1-caching/):** `GET` from Redis; on a miss,
+  read Postgres and `SET` with a TTL. Redis is presented as the first
+  iteration's hash table moved onto the network and shared between
+  processes. `shorten` writes through, so a code's first redirect is
+  already a cache hit.
+- **[4.2 — a Bloom filter](tier-4.2-caching/):** every minted code goes into
+  a RedisBloom filter; `resolve` checks it on a cache miss, before Postgres,
+  so a code that never existed stops costing a database query on every
+  single request.
+- **[4.3 — invalidation and a lease](tier-4.3-caching/):** `PATCH`/`DELETE`
+  finally implemented, invalidating with a plain `DEL` — deliberately the
+  simple, stampede-prone option, since it's the concrete trigger the lease
+  exists to defend against. Redis runs with `allkeys-lfu` eviction.
+  `resolve`'s miss path runs a real lease (`SET lease:{code} 1 NX EX ttl`):
+  only one request rebuilds a hot key at a time, and if that request
+  crashes, leadership transfers to the next waiter the instant the lease
+  expires — no request ever queries Postgres unguarded, and none can be
+  blocked forever.
 
-**Primitives:** `SET`/`GET`/`EXPIRE` for the mapping; Bloom filters (`BF.*`) for
-cheap existence checks that skip Postgres on a code that was never minted.
-(`INCR` counters and HyperLogLog click estimates are analytics, not read-path
-optimization — they move to the seventh iteration, alongside the rest of the
-click-tracking pipeline.)
+**Deliberately not built:** the more sophisticated herd mitigations
+(request coalescing beyond the lease, stale-while-revalidate, probabilistic
+early expiration, TTL jitter) and a formal load test / sequence diagram of
+the failure remain discussion material — see each folder's README and
+`QUESTIONS.md` — rather than code. The lease alone is enough to demonstrate
+and defend against the core failure.
 
-**Eviction:** LRU, LFU, FIFO, TTL expiry, and why Zipfian access — a few URLs
-taking most of the traffic — makes caching so effective here.
-
-**Invalidation:** once `PATCH` and `DELETE` exist, immediate `DEL` (simple, but
-stampedes on a hot key) versus write-through `SET` (no stampede, different
-partial-failure behaviour).
-
-### Thundering herd
-
-Three triggers, each reproducible:
-
-1. **TTL expiry** — a hot key's TTL lapses under sustained load; every in-flight
-   request misses at once and queries the same row.
-2. **Eviction under memory pressure** — with `maxmemory` and a FIFO policy,
-   inserting N+1 keys into a cache sized for N evicts the hottest key. Motivates
-   LRU/LFU as defaults.
-3. **Explicit invalidation** — a `PATCH` deletes the key concurrent readers are
-   requesting. Deterministic and instructor-triggerable with one `curl`. Works
-   only under Path A: a hash-derived code changes on edit, so no shared hot key
-   survives to be invalidated.
-
-Five mitigations, in increasing sophistication: a distributed lock
-(`SET key val NX EX ttl`); in-process request coalescing (singleflight);
-stale-while-revalidate; probabilistic early expiration (XFetch); and TTL jitter
-for the distinct case of many keys expiring in unison.
-
-Ships with a sequence diagram of the failure and a before/after load test
-measuring database query volume.
-
-**Breaks:** still one counter in one process.
+**Breaks:** still one Postgres sequence and one Redis instance, both single
+points of failure, and the counter is a bottleneck once there's more than
+one app server. The lease itself only coordinates a single Redis instance —
+Tier 6's replication reopens a version of the same race.
 
 ---
 
@@ -201,14 +193,19 @@ URLs on the write path without an external call in the hot path.
 ## Repository layout
 
 ```
-Cargo.toml              workspace root — lists every iteration as a member
+Cargo.toml              workspace root — lists every implemented iteration as a member
 rust-toolchain.toml     pins the compiler
+QUESTIONS.md            open discussion questions raised while actually building this
 tier-0-requirements/    README only
+tier-2-collisions/      README only — the design is worked out, no code yet
 tier-N-.../
   README.md             problem, what changed, trade-offs, discussion questions
   src/                  self-contained implementation
-  demo/ | loadtest/     scripts reproducing the failure and verifying the fix
+  docker-compose.yml    local Postgres/Redis, from the third iteration on
 ```
+
+Not every tier has code — some (Tier 0, Tier 2 so far) are design-only
+READMEs, and that's a deliberate stopping point, not an oversight.
 
 Iterations do not depend on each other. Each is a full copy of the previous one
 plus the new idea, so a folder reads standalone and
@@ -239,17 +236,19 @@ BASE_URL=https://sho.rt cargo run -p tier-1-naive
 From the third iteration on, each folder ships a `docker-compose.yml` for its
 Postgres and Redis; `docker compose up -d` inside the folder is enough.
 
-Source ships as **skeletons**: types, signatures, tests and step-by-step comments
-are given, function bodies are `todo!()`. `cargo test -p tier-N-...` starts red
-and goes green as they are filled in.
+Every implemented tier is complete and tested, not a skeleton to fill in —
+`cargo test -p tier-N-...` is green against a live Postgres/Redis where the
+tier needs one. Each tier's own README lists its discussion questions
+whether or not there's code to go with it yet.
 
 ## Status
 
 - [x] Requirements
-- [x] First iteration — naive in-memory (skeleton + tests)
-- [ ] Second iteration — code generation and collisions
-- [ ] Third iteration — persistence
-- [ ] Fourth iteration — caching and the thundering herd
+- [x] First iteration — naive in-memory
+- [x] Second iteration — code generation and collisions (design only, no code)
+- [x] Third iteration — persistence
+- [x] Fourth iteration, quarters 1–3 — cache-aside, Bloom filter, invalidation + lease
+- [ ] Fourth iteration — remaining herd mitigations (singleflight, stale-while-revalidate, XFetch, TTL jitter)
 - [ ] Fifth iteration — distributed ID generation
 - [ ] Sixth iteration — availability and partitioning
 - [ ] Seventh iteration — analytics and abuse prevention
