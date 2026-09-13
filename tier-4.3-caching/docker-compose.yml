@@ -1,0 +1,49 @@
+# Local Postgres + Redis for this tier. `docker compose up -d` inside this
+# folder, then point the app at both with DATABASE_URL / REDIS_URL.
+#
+# Host ports are offset from Tier 4.2's defaults (5435/6381 -> 5436/6382) so
+# every tier's stack can run side by side without a port clash.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shortener
+      POSTGRES_PASSWORD: shortener
+      POSTGRES_DB: shortener
+    ports:
+      - "5436:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortener -d shortener"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis:
+    # `redis-stack-server`, not plain `redis`, from Tier 4.2 on: the
+    # existence-check Bloom filter needs the RedisBloom module (BF.* commands),
+    # which vanilla Redis doesn't ship.
+    image: redis/redis-stack-server:7.4.0-v3
+    restart: unless-stopped
+    environment:
+      # allkeys-lfu: evict the least-*frequently*-used key, across the whole
+      # keyspace, once memory pressure forces an eviction -- the defense
+      # against the "eviction under memory pressure" thundering-herd trigger
+      # (see the README): a naive policy can evict a still-hot key, causing
+      # the exact same stampede as a TTL lapsing. `maxmemory` itself is left
+      # at its default (0, unlimited) so normal runs/tests never evict
+      # anything; set it low (`redis-cli CONFIG SET maxmemory 1mb`) to
+      # actually reproduce the trigger on demand.
+      REDIS_ARGS: "--maxmemory-policy allkeys-lfu"
+    ports:
+      - "6382:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  pgdata:

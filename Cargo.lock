@@ -1604,6 +1604,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tier-4-3-caching"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "redis",
+ "serde",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -20,4 +20,4 @@ Postgres query). That's the direction you want the error to fall.
 RedisBloom module (`BF.*` commands).
 
 **Previous:** [Tier 4.1 — Cache-Aside](../tier-4.1-caching/README.md) ·
-**Next:** Tier 4.3 — eviction and invalidation
+**Next:** [Tier 4.3 — Invalidation and a Lease](../tier-4.3-caching/README.md)
