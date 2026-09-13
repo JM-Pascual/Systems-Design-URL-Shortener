@@ -21,6 +21,9 @@
 //! That is deliberate — see the Tier 4 README's thundering-herd section for
 //! the mitigations this version is missing on purpose.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
 use redis::AsyncCommands;
 use sqlx::{PgPool, Row};
 
@@ -34,6 +37,22 @@ const CACHE_TTL_SECONDS: u64 = 300;
 pub struct Store {
     pool: PgPool,
     redis: redis::aio::MultiplexedConnection,
+    /// How many times `resolve` has actually queried Postgres (a cache
+    /// miss), for the thundering-herd demo's `/metrics` endpoint. This is
+    /// the exact thing a stampede spikes: watch this counter's rate, not
+    /// request volume, since the herd's whole cost is in redundant queries
+    /// to a system that isn't the one clients are talking to.
+    postgres_queries: AtomicU64,
+    /// Artificial delay inserted before the Postgres query on a cache miss,
+    /// from `DEMO_QUERY_DELAY_MS` (default 0 -- off). This exists purely for
+    /// `../thundering-herd-demo/`: a real query against a local, warm
+    /// Postgres returns in well under a millisecond, which makes the miss
+    /// window too narrow for any concurrency tool to reliably land many
+    /// requests inside it. A real thundering herd is a problem precisely
+    /// *because* the query being rebuilt is slow enough for concurrent
+    /// misses to pile up -- this delay simulates that honestly rather than
+    /// faking the comparison some other way.
+    demo_query_delay: Duration,
 }
 
 /// A generic dump of a table's rows, column names discovered at query time
@@ -52,7 +71,25 @@ impl Store {
         let client = redis::Client::open(redis_url)?;
         let redis = client.get_multiplexed_async_connection().await?;
 
-        Ok(Self { pool, redis })
+        let demo_query_delay = Duration::from_millis(
+            std::env::var("DEMO_QUERY_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        );
+
+        Ok(Self {
+            pool,
+            redis,
+            postgres_queries: AtomicU64::new(0),
+            demo_query_delay,
+        })
+    }
+
+    /// Total Postgres queries `resolve` has issued since this process
+    /// started. Used only by the `/metrics` endpoint.
+    pub fn postgres_query_count(&self) -> u64 {
+        self.postgres_queries.load(Ordering::Relaxed)
     }
 
     /// Store a long URL and return the freshly minted short code.
@@ -92,6 +129,10 @@ impl Store {
             return Ok(Some(url));
         }
 
+        self.postgres_queries.fetch_add(1, Ordering::Relaxed);
+        if !self.demo_query_delay.is_zero() {
+            tokio::time::sleep(self.demo_query_delay).await;
+        }
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )

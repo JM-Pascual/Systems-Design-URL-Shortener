@@ -1,0 +1,12 @@
+global:
+  # Fast enough to see a burst clearly without an enormous time window.
+  scrape_interval: 2s
+
+scrape_configs:
+  - job_name: "tier-4.1-unmitigated"
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+
+  - job_name: "tier-4.3-lease"
+    static_configs:
+      - targets: ["host.docker.internal:3002"]

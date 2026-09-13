@@ -1,0 +1,50 @@
+{
+  "title": "Thundering Herd: Postgres Query Rate",
+  "uid": "thundering-herd",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "2s",
+  "time": { "from": "now-5m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Postgres queries/sec from resolve() -- spike vs. flat line",
+      "description": "Tier 4.1 has no coordination on a cache miss: every concurrent request queries Postgres independently. Tier 4.3's lease lets only one request per stampede become the leader.",
+      "gridPos": { "h": 16, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "qps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "pointSize": 5,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "rate(postgres_queries_total{job=\"tier-4.1-unmitigated\"}[5s])",
+          "legendFormat": "Tier 4.1 -- no lease",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "rate(postgres_queries_total{job=\"tier-4.3-lease\"}[5s])",
+          "legendFormat": "Tier 4.3 -- with lease",
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    }
+  ]
+}

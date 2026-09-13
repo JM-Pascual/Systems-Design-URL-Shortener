@@ -1,0 +1,33 @@
+# Prometheus + Grafana only -- the two app instances being compared run on
+# the host via `cargo run` (see README.md), and each tier's own Postgres +
+# Redis come from that tier's own docker-compose.yml.
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    # Lets a container reach the host's ports (where the two app instances
+    # listen) via `host.docker.internal` -- on Docker Desktop this exists
+    # by default, but the Linux Docker Engine needs it added explicitly.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "3001:3000"
+    environment:
+      # Anonymous viewer access so the dashboard is just a URL to open, no
+      # login needed for a local teaching demo.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

@@ -121,6 +121,20 @@ async fn delete_link(
     }
 }
 
+/// `GET /metrics` — Prometheus text exposition format, for the
+/// thundering-herd demo (`../thundering-herd-demo/`). Same counter as Tier
+/// 4.1's `/metrics`, so both can be plotted on one graph: how many times
+/// `resolve` has actually queried Postgres. Here, that only happens once
+/// per lease acquisition, not once per concurrent request.
+async fn metrics(State(state): State<Arc<AppState>>) -> String {
+    format!(
+        "# HELP postgres_queries_total Total resolve() calls that queried Postgres.\n\
+         # TYPE postgres_queries_total counter\n\
+         postgres_queries_total {}\n",
+        state.store.postgres_query_count()
+    )
+}
+
 /// `GET /stats` — a literal `SELECT * FROM links`, rendered as an ASCII
 /// table. Postgres only — it doesn't reflect what's currently cached.
 async fn stats(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
@@ -184,22 +198,27 @@ async fn main() {
     let app = Router::new()
         .route("/shorten", post(shorten))
         .route("/stats", get(stats))
+        .route("/metrics", get(metrics))
         .route(
             "/{code}",
             get(redirect).patch(patch_link).delete(delete_link),
         )
         .with_state(Arc::clone(&state));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    // Configurable so the thundering-herd demo can run this tier and Tier
+    // 4.1 side by side on one machine -- they can't both bind :3000.
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .expect("port 3000 already in use?");
+        .unwrap_or_else(|_| panic!("port {port} already in use?"));
 
-    println!("tier-4.3-caching listening on 0.0.0.0:3000");
+    println!("tier-4.3-caching listening on {addr}");
     println!("minting short URLs as {}/{{code}}", state.config.base_url);
     println!();
-    println!("  curl -X POST localhost:3000/shorten -H 'content-type: application/json' \\");
+    println!("  curl -X POST localhost:{port}/shorten -H 'content-type: application/json' \\");
     println!("       -d '{{\"url\":\"https://example.com\"}}'");
-    println!("  curl -i localhost:3000/0");
+    println!("  curl -i localhost:{port}/0");
 
     axum::serve(listener, app).await.expect("server error");
 }

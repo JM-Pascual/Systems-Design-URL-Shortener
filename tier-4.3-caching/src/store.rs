@@ -38,10 +38,12 @@
 //! still falls through to Postgres and correctly gets `None`; the code just
 //! permanently loses the filter's fast-path benefit.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
 use redis::AsyncCommands;
 use redis::{ExistenceCheck, SetExpiry, SetOptions};
 use sqlx::{PgPool, Row};
-use std::time::Duration;
 
 use crate::base62;
 
@@ -74,6 +76,16 @@ const BLOOM_CAPACITY: i64 = 1_000_000;
 pub struct Store {
     pool: PgPool,
     redis: redis::aio::MultiplexedConnection,
+    /// How many times `resolve` has actually queried Postgres -- i.e. how
+    /// many times a request became the lease's *leader*. For the
+    /// thundering-herd demo's `/metrics` endpoint: this is exactly the
+    /// count the lease is supposed to keep near 1 per stampede, versus
+    /// Tier 4.1's version where it tracks concurrent request count.
+    postgres_queries: AtomicU64,
+    /// See Tier 4.1's `Store` for why this exists: simulates a realistically
+    /// slow backend query so a local demo's miss window is wide enough for
+    /// concurrent requests to actually land inside it.
+    demo_query_delay: Duration,
 }
 
 /// A generic dump of a table's rows, column names discovered at query time
@@ -108,7 +120,25 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
 
-        Ok(Self { pool, redis })
+        let demo_query_delay = Duration::from_millis(
+            std::env::var("DEMO_QUERY_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        );
+
+        Ok(Self {
+            pool,
+            redis,
+            postgres_queries: AtomicU64::new(0),
+            demo_query_delay,
+        })
+    }
+
+    /// Total Postgres queries `resolve` has issued since this process
+    /// started. Used only by the `/metrics` endpoint.
+    pub fn postgres_query_count(&self) -> u64 {
+        self.postgres_queries.load(Ordering::Relaxed)
     }
 
     /// Add a code to the Bloom filter. Called once, when `shorten` mints it.
@@ -259,6 +289,10 @@ impl Store {
             // cache or, on a real miss, release the lease immediately
             // rather than making everyone else wait out its full TTL for a
             // question that's already been definitively answered.
+            self.postgres_queries.fetch_add(1, Ordering::Relaxed);
+            if !self.demo_query_delay.is_zero() {
+                tokio::time::sleep(self.demo_query_delay).await;
+            }
             let row: Option<(String,)> = sqlx::query_as(
                 "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
             )
