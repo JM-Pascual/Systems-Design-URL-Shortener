@@ -21,18 +21,20 @@ members = [
     "tier-4.1-caching",
     "tier-4.2-caching",
     "tier-4.3-caching",
+    "tier-4.4-caching",
 ]
 
 # Dependency versions are declared once here and inherited by member crates
 # with `foo.workspace = true`. Keeps every tier on the same axum/tokio.
 [workspace.dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "migrate"] }
 chrono = { version = "0.4", features = ["serde"] }
 redis = { version = "1.7", features = ["tokio-comp"] }
 anyhow = "1"
+rand = "0.8"
 
 [workspace.package]
 edition = "2024"
