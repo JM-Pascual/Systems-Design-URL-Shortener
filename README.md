@@ -159,19 +159,16 @@ exactly what each one adds, the same discipline as the tiers themselves.
 ## Repository layout
 
 ```
-Cargo.toml              workspace root — lists every implemented iteration as a member
+Cargo.toml              workspace root — lists every iteration with code as a member
 rust-toolchain.toml     pins the compiler
-QUESTIONS.md            open discussion questions raised while actually building this
+QUESTIONS.md            discussion questions raised while building this
 tier-0-requirements/    README only
-tier-2-collisions/      README only — the design is worked out, no code yet
+tier-2-collisions/      README only — design, no code
 tier-N-.../
   README.md             problem, what changed, trade-offs, discussion questions
   src/                  self-contained implementation
   docker-compose.yml    local Postgres/Redis, from the third iteration on
 ```
-
-Not every tier has code — some (Tier 0, Tier 2 so far) are design-only
-READMEs, and that's a deliberate stopping point, not an oversight.
 
 Iterations do not depend on each other. Each is a full copy of the previous one
 plus the new idea, so a folder reads standalone and
