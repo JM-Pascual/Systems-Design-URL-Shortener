@@ -102,18 +102,13 @@ Tier 4.4). It's also the one that generalizes to trigger #3 above:
 point of view — both are just "the key isn't there anymore" — so the same
 lease defends against both without knowing which one happened.
 
-Verified two ways beyond the test suite: a simulated crashed leader (a
-short-lived lease manually set with nothing behind it) correctly makes a
-fresh request wait out the expiry and take over cleanly; 30 real concurrent
-requests against a cold key all resolve correctly with no errors or hangs.
-
 ---
 
 ## What breaks here
 
 | Problem | Status |
 |---|---|
-| Still one Postgres `nextval()` sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem — the class ends at Tier 4.4 |
+| Still one Postgres `nextval()` sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem |
 | The lease only protects a single Redis instance's view of a key. Replicating Redis for availability would mean a lease acquired against a primary that hasn't yet propagated to a replica is a new race. | Open problem |
 
 ---

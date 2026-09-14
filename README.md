@@ -2,9 +2,7 @@
 
 One system, built in five iterations — the fourth broken into four
 incremental quarters. Each iteration is broken in a specific, demonstrable
-way; the next one exists to fix it, through Tier 4.4, where the class
-concludes. What Tier 4.4 still breaks is left as discussion material — see
-its README and `QUESTIONS.md` — not a promise of further chapters.
+way; the next one exists to fix it.
 
 **Language:** Rust (edition 2024, toolchain pinned in `rust-toolchain.toml`).
 **Infrastructure:** Docker Compose, from the third iteration onward.
@@ -156,17 +154,6 @@ exactly what each one adds, the same discipline as the tiers themselves.
   row; the README walks through why. TTL jitter spreads out the
   *different* failure of many keys expiring in unison.
 
-**Deliberately not built:** stale-while-revalidate and a formal load test /
-sequence diagram of the failure remain discussion material — see each
-folder's README and `QUESTIONS.md` — rather than code.
-
-**Breaks:** still one Postgres sequence and one Redis instance, both single
-points of failure, and the counter is a bottleneck once there's more than
-one app server. The lease itself only coordinates a single Redis instance;
-replicating Redis for availability would reopen a version of the same race.
-These are where the class ends — left as open problems, not upcoming
-chapters.
-
 ---
 
 ## Repository layout
@@ -214,26 +201,3 @@ BASE_URL=https://sho.rt cargo run -p tier-1-naive
 
 From the third iteration on, each folder ships a `docker-compose.yml` for its
 Postgres and Redis; `docker compose up -d` inside the folder is enough.
-
-Every implemented tier is complete and tested, not a skeleton to fill in —
-`cargo test -p tier-N-...` is green against a live Postgres/Redis where the
-tier needs one. Each tier's own README lists its discussion questions
-whether or not there's code to go with it yet.
-
-## Status
-
-**Complete.** Every planned iteration is either implemented and tested or,
-where noted, intentionally scoped as design-only.
-
-- [x] Requirements
-- [x] First iteration — naive in-memory
-- [x] Second iteration — code generation and collisions (design only, no code)
-- [x] Third iteration — persistence
-- [x] Fourth iteration, quarter 1 — cache-aside
-- [x] Fourth iteration, quarter 2 — Bloom filter
-- [x] Fourth iteration, quarter 3 — invalidation and a lease
-- [x] Fourth iteration, quarter 4 — singleflight, TTL keep-alive, TTL jitter
-
-Stale-while-revalidate, a formal load test, and a sequence diagram of the
-thundering herd remain deliberately unbuilt — see Tier 4's discussion
-questions and `QUESTIONS.md`.

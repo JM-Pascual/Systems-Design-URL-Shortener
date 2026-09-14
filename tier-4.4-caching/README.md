@@ -1,9 +1,8 @@
 # Tier 4.4 — Caching with Redis: Singleflight, TTL Keep-Alive, TTL Jitter
 
 A copy of [Tier 4.3](../tier-4.3-caching/) plus three more mitigations. The
-lease (Tier 4.3) was the first and simplest; stale-while-revalidate was
-deliberately skipped. These three layer on top of the lease rather than
-replacing it.
+lease (Tier 4.3) was the first and simplest; these three layer on top of it
+rather than replacing it.
 
 ---
 
@@ -30,11 +29,6 @@ would each have their own `inflight` map — the lease is still what would
 coordinate *between* them. Singleflight and the lease are complementary,
 not alternatives: singleflight handles the common case cheaply, the lease
 handles the case singleflight can't see.
-
-Verified with an actual test
-(`store::tests::concurrent_misses_singleflight_to_one_query`): 20 concurrent
-`resolve` calls for a freshly-cleared code produce exactly 1 Postgres query,
-not 20.
 
 ---
 
@@ -93,11 +87,6 @@ the old value indefinitely — that's the case where a real re-fetch would
 earn its cost. And it relies on `allkeys-lfu` to bound memory, since
 kept-alive keys don't age out on their own.
 
-Verified with two tests: `sustained_reads_near_expiry_extend_ttl` (50 reads
-at 3s remaining leave the TTL at ~30s and `postgres_queries` unchanged) and
-`reads_far_from_expiry_do_not_extend_ttl` (50 reads at ~300s remaining
-leave the TTL untouched).
-
 ---
 
 ## TTL jitter: spreading out *mass* expiry
@@ -111,21 +100,14 @@ triggering its own (small) miss at the same moment. Spreading their
 expiries over a 30-second window turns one synchronized event into many
 small, staggered ones.
 
-Verified: five codes minted back-to-back came back with TTLs of 303, 311,
-322, 325, and 314 — all in range, genuinely different.
-
 ---
 
 ## What breaks here
-
-The class ends here — everything below is left as an open problem, not an
-upcoming chapter.
 
 | Problem | Status |
 |---|---|
 | Still one Postgres sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem |
 | Singleflight only coordinates within one process; a fleet of app instances would still rely entirely on the lease to coordinate with each other. | Open problem |
-| Stale-while-revalidate remains deliberately unbuilt — there's no "serve the old value while a refresh runs in the background *because the value is already gone*" path. The keep-alive prevents the value from going away in the first place, which is a different thing. | Not planned |
 | The keep-alive assumes every write goes through this app's `PATCH`/`DELETE`. Anything writing Postgres directly would leave hot keys serving stale data indefinitely. | Open problem |
 
 ---
@@ -159,7 +141,3 @@ upcoming chapter.
    background re-fetch would be the right call.
 
 **Previous:** [Tier 4.3 — Invalidation and a Lease](../tier-4.3-caching/README.md)
-
-This is the last chapter. The class concludes here — see the root
-[README](../README.md#status) and this file's "What breaks here" section
-for what's deliberately left as an open problem rather than a next tier.

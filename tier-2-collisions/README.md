@@ -24,8 +24,7 @@ base62. This is the path the rest of the course carries forward.
   it preserves uniqueness while destroying the ordering.
 - **Requires a shared counter.** Every instance minting codes has to agree on
   "what's next," which is fine with one process (Tier 1) and becomes a
-  genuine open problem once there are several — left unsolved here; the
-  class ends at Tier 4.4.
+  genuine open problem once there are several.
 
 ### Path B — truncated hash of the URL
 
@@ -104,7 +103,7 @@ on to solve a different way.
 
 | Problem | Status |
 |---|---|
-| A single shared counter (Path A) is a bottleneck once there are multiple app servers. | Open problem — the class ends at Tier 4.4 |
+| A single shared counter (Path A) is a bottleneck once there are multiple app servers. | Open problem |
 
 ---
 

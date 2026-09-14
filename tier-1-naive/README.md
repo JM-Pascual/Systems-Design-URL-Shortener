@@ -47,24 +47,6 @@ curl -i localhost:3000/0
 #    location: https://en.wikipedia.org/wiki/Hash_table
 ```
 
-## Your implementation tasks
-
-Five `todo!()`s. Run `cargo test -p tier-1-naive` — everything fails until you
-fill them in, and passes when you are done.
-
-| File | Function | Teaches |
-|---|---|---|
-| `src/base62.rs` | `encode` | repeated division; `Vec<u8>` → `String` |
-| `src/base62.rs` | `decode` | Horner's method; checked arithmetic; custom error types |
-| `src/store.rs` | `shorten` | ownership: taking `String` by value to store it |
-| `src/store.rs` | `resolve` | why you clone out of a `Mutex` instead of returning `&str` |
-| `src/config.rs` | `Config::from_env` | reading env vars; `unwrap_or_else` vs `unwrap_or`; borrows that outlive a local |
-
-Each `todo!()` has a step-by-step comment above it, including the Rust-specific
-notes. Read the comment, write the body, delete the `let _ = ...;` line above it.
-
----
-
 ## The two ideas in this tier
 
 ### 1. The hash table
@@ -99,7 +81,7 @@ built entirely on that property. Tier 2 makes the argument properly.
 | Problem | Symptom you can demo | Status |
 |---|---|---|
 | **Volatile** | `curl` a link, `Ctrl-C` the server, restart, `curl` again → 404 | Fixed in Tier 3 — Postgres |
-| **Single process** | Start two servers on ports 3000 and 3001. Both hand out code `"0"` for different URLs. | Open problem — the class ends at Tier 4.4 |
+| **Single process** | Start two servers on ports 3000 and 3001. Both hand out code `"0"` for different URLs. | Open problem |
 | **Bounded by RAM** | Tier 0 estimated 50 GB/month of URLs. | Open problem |
 | **One global mutex** | Every request, reads included, serialises behind one lock. | Fixed in Tier 4 — shared cache |
 | **Enumerable codes** | `curl localhost:3000/0`, `/1`, `/2`, … walks the entire database. | Fixed in Tier 2 — permutation |

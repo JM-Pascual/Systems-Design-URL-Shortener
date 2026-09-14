@@ -62,7 +62,7 @@ felt the failure it's fixing.
 |---|---|
 | A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Fixed in Tier 4.2 — Bloom filter |
 | No coordination on a cache-miss stampede (thundering herd). | Fixed in Tier 4.3 — a lease |
-| Still one counter in one process. | Open problem — the class ends at Tier 4.4 |
+| Still one counter in one process. | Open problem |
 
 ---
 

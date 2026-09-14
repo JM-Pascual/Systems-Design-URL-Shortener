@@ -190,8 +190,7 @@ technology's own merits.
 | 100:1 reads, <10 ms latency (§3.1, §3.2) | Tier 4 — Redis cache-aside |
 | Editable destinations (§2, optional) | Tier 4 — invalidation, thundering herd |
 
-Three requirements are named here but not cashed out in a chapter — left as
-open problems where the class ends, at Tier 4.4:
+Three requirements are named here but not cashed out in a chapter:
 
 - **More than one app server** (§3.1) — a shared counter across instances.
 - **Availability over consistency** (§3.3) — replication and partitioning.

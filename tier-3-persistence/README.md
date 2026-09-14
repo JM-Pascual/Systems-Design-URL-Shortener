@@ -4,9 +4,6 @@
 `Ctrl-C` the server and every short link ever created is gone. This tier moves
 the mapping into Postgres so a restart stops being a data-loss event.
 
-No implementation yet — this tier is design only, worked out before any code
-gets written.
-
 ---
 
 ## Schema
@@ -72,7 +69,7 @@ just sitting in RAM.
 - **`shorten` becomes an `INSERT`; `resolve` becomes a `SELECT`.** Both are now
   fallible over the network (connection drop, pool exhaustion, constraint
   violation) in a way an in-memory `HashMap::get` never was — this tier is
-  also where error handling has to become real instead of a `todo!()`.
+  also where error handling has to become real.
 - **Local Postgres via `docker-compose.yml`**, per the root README's
   repository layout — every tier from here on ships one.
 
