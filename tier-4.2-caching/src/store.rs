@@ -26,6 +26,13 @@
 //! wasted Postgres query, a false negative would incorrectly 404 a real
 //! link.
 //!
+//! That guarantee only holds if the filter actually contains every code.
+//! Two things protect it: `shorten` adds to the filter *before* the
+//! `INSERT` (so a partial failure can only produce a harmless false
+//! positive, never a false negative), and `connect` backfills the filter
+//! from Postgres on every start (so a Redis restart or flush can't turn
+//! every existing link into a 404).
+//!
 //! # Why this exact version is vulnerable to a thundering herd
 //!
 //! There is no coordination here at all: if a hot key's TTL lapses under
@@ -55,6 +62,9 @@ const CODES_BLOOM_KEY: &str = "codes_bloom";
 const BLOOM_ERROR_RATE: f64 = 0.01;
 const BLOOM_CAPACITY: i64 = 1_000_000;
 
+/// How many codes go into one `BF.MADD` during the startup backfill.
+const BLOOM_BACKFILL_CHUNK: usize = 1_000;
+
 pub struct Store {
     pool: PgPool,
     redis: redis::aio::MultiplexedConnection,
@@ -69,7 +79,14 @@ pub struct TableDump {
 
 impl Store {
     /// Connect to Postgres (running pending migrations) and Redis, and make
-    /// sure the codes Bloom filter exists.
+    /// sure the codes Bloom filter exists *and reflects every code Postgres
+    /// already has*.
+    ///
+    /// The backfill is what keeps the filter honest across a Redis restart
+    /// or flush. Without it, an empty filter would answer "definitely not
+    /// minted" for every link Postgres still holds -- turning a cache
+    /// outage into every existing link 404ing. `BF.ADD` is idempotent, so
+    /// re-adding codes an existing filter already has is harmless.
     pub async fn connect(database_url: &str, redis_url: &str) -> Result<Self, anyhow::Error> {
         let pool = PgPool::connect(database_url).await?;
         sqlx::migrate!().run(&pool).await?;
@@ -90,6 +107,18 @@ impl Store {
             Ok(()) => {}
             Err(e) if e.to_string().contains("item exists") => {}
             Err(e) => return Err(e.into()),
+        }
+
+        let codes: Vec<(String,)> = sqlx::query_as("SELECT code FROM links")
+            .fetch_all(&pool)
+            .await?;
+        for chunk in codes.chunks(BLOOM_BACKFILL_CHUNK) {
+            let mut cmd = redis::cmd("BF.MADD");
+            cmd.arg(CODES_BLOOM_KEY);
+            for (code,) in chunk {
+                cmd.arg(code);
+            }
+            cmd.query_async::<Vec<i64>>(&mut redis).await?;
         }
 
         Ok(Self { pool, redis })
@@ -126,23 +155,33 @@ impl Store {
     /// instead of `&mut self`, so `Store` stays shareable across concurrent
     /// requests without a `Mutex`, exactly like Tier 3.
     ///
-    /// Postgres is written *before* Redis, deliberately: writing the cache
-    /// first would make a code externally resolvable before its row is
-    /// durably committed, so a failed `INSERT` after a successful `SET`
-    /// would leave Redis pointing at a URL Postgres never actually has.
+    /// Two Redis writes here, and they sit on *opposite* sides of the
+    /// `INSERT` on purpose, because their failure modes point in opposite
+    /// directions:
+    ///
+    /// - The Bloom filter is written **before** the `INSERT`. If the filter
+    ///   gains a code whose `INSERT` then fails, that's a false positive --
+    ///   one wasted Postgres query on a future miss, harmless. If instead
+    ///   the `INSERT` committed and the `BF.ADD` then failed, that's a false
+    ///   negative -- the filter says "never minted" and `resolve` 404s a
+    ///   real link. So the filter goes first.
+    /// - The value cache is written **after** the `INSERT`. Writing it first
+    ///   would make a code externally resolvable before its row is durably
+    ///   committed, so a failed `INSERT` after a successful `SET` would leave
+    ///   Redis pointing at a URL Postgres never actually has.
     pub async fn shorten(&self, url: String) -> Result<String, anyhow::Error> {
         let (id,): (i64,) = sqlx::query_as("SELECT nextval('link_ids')")
             .fetch_one(&self.pool)
             .await?;
         let code = base62::encode(id as u64);
 
+        self.bloom_add(&code).await?;
+
         sqlx::query("INSERT INTO links (code, long_url) VALUES ($1, $2)")
             .bind(&code)
             .bind(&url)
             .execute(&self.pool)
             .await?;
-
-        self.bloom_add(&code).await?;
 
         let mut redis = self.redis.clone();
         redis.set_ex::<_, _, ()>(&code, &url, CACHE_TTL_SECONDS).await?;
@@ -277,6 +316,31 @@ mod tests {
         assert_eq!(
             store.resolve(&code).await.unwrap(),
             Some("https://cached.example".to_string())
+        );
+    }
+
+    /// A Redis wipe must not turn existing links into 404s: a fresh
+    /// `connect` backfills the Bloom filter from Postgres, so a code minted
+    /// before the wipe still passes the filter and resolves afterward.
+    #[tokio::test]
+    #[ignore]
+    async fn bloom_filter_survives_a_redis_flush() {
+        let store = test_store().await;
+        let code = store.shorten("https://survives.example".into()).await.unwrap();
+
+        let mut redis = redis::Client::open(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6381".into()),
+        )
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+        let _: () = redis::cmd("FLUSHALL").query_async(&mut redis).await.unwrap();
+
+        let reconnected = test_store().await;
+        assert_eq!(
+            reconnected.resolve(&code).await.unwrap(),
+            Some("https://survives.example".to_string())
         );
     }
 }

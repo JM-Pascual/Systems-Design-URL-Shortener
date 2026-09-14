@@ -27,8 +27,15 @@ services:
     # which vanilla Redis doesn't ship.
     image: redis/redis-stack-server:7.4.0-v3
     restart: unless-stopped
+    environment:
+      # appendonly: the Bloom filter lives in Redis, and while `connect`
+      # backfills it from Postgres on every start, there's no reason to
+      # also lose it on a plain restart.
+      REDIS_ARGS: "--appendonly yes"
     ports:
       - "6381:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -37,3 +44,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

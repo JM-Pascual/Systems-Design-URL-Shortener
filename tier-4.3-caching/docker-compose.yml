@@ -36,9 +36,14 @@ services:
       # at its default (0, unlimited) so normal runs/tests never evict
       # anything; set it low (`redis-cli CONFIG SET maxmemory 1mb`) to
       # actually reproduce the trigger on demand.
-      REDIS_ARGS: "--maxmemory-policy allkeys-lfu"
+      # appendonly: the Bloom filter lives in Redis, and while `connect`
+      # backfills it from Postgres on every start, there's no reason to
+      # also lose it on a plain restart.
+      REDIS_ARGS: "--maxmemory-policy allkeys-lfu --appendonly yes"
     ports:
       - "6382:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -47,3 +52,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

@@ -20,6 +20,14 @@ Tier 0's two deferred write operations, finally implemented:
 Both write Postgres first, same durability discipline as `shorten`: only
 invalidate the cache once the new state is durably committed.
 
+Both also hold the code's lease (the same `lease:{code}` the miss path uses,
+below) across the write and the `DEL`. Without that there's a classic
+cache-aside race: a `resolve` leader `SELECT`s the old URL, the `UPDATE` and
+`DEL` land in between, and the leader then `SET`s the old URL right back —
+stale for a full TTL, with nothing to invalidate it. Serializing *every*
+write to a code's cache entry on one lease, rebuild or invalidation, is
+what closes it.
+
 `DEL` here is deliberately the *simple* invalidation strategy from Tier 4.1's
 discussion — "immediate `DEL` (simple, but stampedes on a hot key)" — rather
 than a write-through `SET`. That's not an oversight: it's the concrete

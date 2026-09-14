@@ -26,12 +26,23 @@
 //! wasted Postgres query, a false negative would incorrectly 404 a real
 //! link.
 //!
+//! That guarantee only holds if the filter actually contains every code.
+//! Two things protect it: `shorten` adds to the filter *before* the
+//! `INSERT` (so a partial failure can only produce a harmless false
+//! positive, never a false negative), and `connect` backfills the filter
+//! from Postgres on every start (so a Redis restart or flush can't turn
+//! every existing link into a 404).
+//!
 //! # Quarter 3: PATCH/DELETE, and a lease against the thundering herd
 //!
 //! `update` and `delete` both write Postgres first (same durability
 //! discipline as `shorten`), then invalidate with a plain Redis `DEL` --
 //! deliberately the simple, stampede-prone approach from the README, since
 //! it's the concrete trigger `resolve`'s lease exists to defend against.
+//! They also *hold* that lease while they do it: every write to a code's
+//! cache entry, rebuild or invalidation, serializes on `lease:{code}`, so
+//! an invalidation can't land in the middle of a rebuild and get its
+//! `DEL` overwritten by a `SET` of the value it just made stale.
 //!
 //! A deleted code is never removed from the Bloom filter -- standard Bloom
 //! filters have no removal operation. That's harmless, not a bug: `resolve`
@@ -73,6 +84,15 @@ const CODES_BLOOM_KEY: &str = "codes_bloom";
 const BLOOM_ERROR_RATE: f64 = 0.01;
 const BLOOM_CAPACITY: i64 = 1_000_000;
 
+/// How many codes go into one `BF.MADD` during the startup backfill.
+const BLOOM_BACKFILL_CHUNK: usize = 1_000;
+
+/// The Redis key guarding all writes to a code's cache entry -- the miss
+/// path's rebuild and `update`/`delete`'s invalidation alike.
+fn lease_key(code: &str) -> String {
+    format!("lease:{code}")
+}
+
 pub struct Store {
     pool: PgPool,
     redis: redis::aio::MultiplexedConnection,
@@ -97,7 +117,14 @@ pub struct TableDump {
 
 impl Store {
     /// Connect to Postgres (running pending migrations) and Redis, and make
-    /// sure the codes Bloom filter exists.
+    /// sure the codes Bloom filter exists *and reflects every code Postgres
+    /// already has*.
+    ///
+    /// The backfill is what keeps the filter honest across a Redis restart
+    /// or flush. Without it, an empty filter would answer "definitely not
+    /// minted" for every link Postgres still holds -- turning a cache
+    /// outage into every existing link 404ing. `BF.ADD` is idempotent, so
+    /// re-adding codes an existing filter already has is harmless.
     pub async fn connect(database_url: &str, redis_url: &str) -> Result<Self, anyhow::Error> {
         let pool = PgPool::connect(database_url).await?;
         sqlx::migrate!().run(&pool).await?;
@@ -118,6 +145,18 @@ impl Store {
             Ok(()) => {}
             Err(e) if e.to_string().contains("item exists") => {}
             Err(e) => return Err(e.into()),
+        }
+
+        let codes: Vec<(String,)> = sqlx::query_as("SELECT code FROM links")
+            .fetch_all(&pool)
+            .await?;
+        for chunk in codes.chunks(BLOOM_BACKFILL_CHUNK) {
+            let mut cmd = redis::cmd("BF.MADD");
+            cmd.arg(CODES_BLOOM_KEY);
+            for (code,) in chunk {
+                cmd.arg(code);
+            }
+            cmd.query_async::<Vec<i64>>(&mut redis).await?;
         }
 
         let demo_query_delay = Duration::from_millis(
@@ -172,15 +211,27 @@ impl Store {
     /// instead of `&mut self`, so `Store` stays shareable across concurrent
     /// requests without a `Mutex`, exactly like Tier 3.
     ///
-    /// Postgres is written *before* Redis, deliberately: writing the cache
-    /// first would make a code externally resolvable before its row is
-    /// durably committed, so a failed `INSERT` after a successful `SET`
-    /// would leave Redis pointing at a URL Postgres never actually has.
+    /// Two Redis writes here, and they sit on *opposite* sides of the
+    /// `INSERT` on purpose, because their failure modes point in opposite
+    /// directions:
+    ///
+    /// - The Bloom filter is written **before** the `INSERT`. If the filter
+    ///   gains a code whose `INSERT` then fails, that's a false positive --
+    ///   one wasted Postgres query on a future miss, harmless. If instead
+    ///   the `INSERT` committed and the `BF.ADD` then failed, that's a false
+    ///   negative -- the filter says "never minted" and `resolve` 404s a
+    ///   real link. So the filter goes first.
+    /// - The value cache is written **after** the `INSERT`. Writing it first
+    ///   would make a code externally resolvable before its row is durably
+    ///   committed, so a failed `INSERT` after a successful `SET` would leave
+    ///   Redis pointing at a URL Postgres never actually has.
     pub async fn shorten(&self, url: String) -> Result<String, anyhow::Error> {
         let (id,): (i64,) = sqlx::query_as("SELECT nextval('link_ids')")
             .fetch_one(&self.pool)
             .await?;
         let code = base62::encode(id as u64);
+
+        self.bloom_add(&code).await?;
 
         sqlx::query("INSERT INTO links (code, long_url) VALUES ($1, $2)")
             .bind(&code)
@@ -188,57 +239,101 @@ impl Store {
             .execute(&self.pool)
             .await?;
 
-        self.bloom_add(&code).await?;
-
         let mut redis = self.redis.clone();
         redis.set_ex::<_, _, ()>(&code, &url, CACHE_TTL_SECONDS).await?;
 
         Ok(code)
     }
 
+    /// One `SET lease:{code} 1 NX EX` attempt. `true` means this caller now
+    /// holds the lease; `false` means someone else does.
+    async fn try_acquire_lease(
+        redis: &mut redis::aio::MultiplexedConnection,
+        lease_key: &str,
+    ) -> Result<bool, anyhow::Error> {
+        let options = SetOptions::default()
+            .conditional_set(ExistenceCheck::NX)
+            .with_expiration(SetExpiry::EX(LEASE_TTL_SECONDS));
+        let acquired: Option<String> = redis.set_options(lease_key, 1, options).await?;
+        Ok(acquired.is_some())
+    }
+
+    /// Block until the lease is ours. Used by the invalidating writes,
+    /// which -- unlike the miss path -- have no cached value to return
+    /// early with, so they just wait their turn.
+    async fn acquire_lease(
+        redis: &mut redis::aio::MultiplexedConnection,
+        lease_key: &str,
+    ) -> Result<(), anyhow::Error> {
+        while !Self::try_acquire_lease(redis, lease_key).await? {
+            tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
+        }
+        Ok(())
+    }
+
     /// Change a code's destination. Returns `false` if the code doesn't
     /// exist (caller turns that into a 404).
     ///
-    /// Postgres first, same reasoning as `shorten`: only invalidate the
-    /// cache once the new value is durably committed. Invalidation here is
-    /// a plain `DEL`, not a write-through `SET` -- see the module doc for
-    /// why that's the point, not an oversight.
+    /// Takes the same lease the miss path does. Without it there's a
+    /// classic cache-aside race: a `resolve` leader `SELECT`s the *old* URL,
+    /// this `UPDATE` + `DEL` land in between, and the leader then `SET`s the
+    /// old URL back -- stale for a full TTL. Holding the lease across the
+    /// `UPDATE` and the `DEL` means a rebuild can't be mid-flight while the
+    /// row changes underneath it.
+    ///
+    /// Within the lease: Postgres first, same reasoning as `shorten` -- only
+    /// invalidate the cache once the new value is durably committed.
+    /// Invalidation is a plain `DEL`, not a write-through `SET`; see the
+    /// module doc for why that's the point, not an oversight.
     pub async fn update(&self, code: &str, url: &str) -> Result<bool, anyhow::Error> {
-        let result = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
-            .bind(code)
-            .bind(url)
-            .execute(&self.pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            return Ok(false);
-        }
-
         let mut redis = self.redis.clone();
-        redis.del::<_, ()>(code).await?;
+        let lease_key = lease_key(code);
+        Self::acquire_lease(&mut redis, &lease_key).await?;
 
-        Ok(true)
+        let outcome = async {
+            let result = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
+                .bind(code)
+                .bind(url)
+                .execute(&self.pool)
+                .await?;
+            if result.rows_affected() == 0 {
+                return Ok(false);
+            }
+            redis.del::<_, ()>(code).await?;
+            Ok(true)
+        }
+        .await;
+
+        redis.del::<_, ()>(&lease_key).await?;
+        outcome
     }
 
     /// Remove a code entirely. Returns `false` if it didn't exist.
     ///
     /// Without the `DEL` here, a deleted link would keep redirecting
     /// successfully -- serving a cached URL for a row that no longer
-    /// exists -- until its TTL happened to lapse on its own.
+    /// exists -- until its TTL happened to lapse on its own. Lease-guarded
+    /// for the same reason as `update`.
     pub async fn delete(&self, code: &str) -> Result<bool, anyhow::Error> {
-        let result = sqlx::query("DELETE FROM links WHERE code = $1")
-            .bind(code)
-            .execute(&self.pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            return Ok(false);
-        }
-
         let mut redis = self.redis.clone();
-        redis.del::<_, ()>(code).await?;
+        let lease_key = lease_key(code);
+        Self::acquire_lease(&mut redis, &lease_key).await?;
 
-        Ok(true)
+        let outcome = async {
+            let result = sqlx::query("DELETE FROM links WHERE code = $1")
+                .bind(code)
+                .execute(&self.pool)
+                .await?;
+            if result.rows_affected() == 0 {
+                return Ok(false);
+            }
+            redis.del::<_, ()>(code).await?;
+            Ok(true)
+        }
+        .await;
+
+        redis.del::<_, ()>(&lease_key).await?;
+        outcome
     }
 
     /// Look up the long URL for a code — Redis first, Postgres on a miss,
@@ -265,52 +360,54 @@ impl Store {
             return Ok(None);
         }
 
-        let lease_key = format!("lease:{code}");
-        let lease_options = SetOptions::default()
-            .conditional_set(ExistenceCheck::NX)
-            .with_expiration(SetExpiry::EX(LEASE_TTL_SECONDS));
+        let lease_key = lease_key(code);
 
         loop {
             // Check if another worker did a cache SET
             if let Some(url) = redis.get::<_, Option<String>>(code).await? {
                 return Ok(Some(url));
             }
-            
-            // Attempt to acquire the lease
-            let acquired: Option<String> =
-                redis.set_options(&lease_key, 1, lease_options.clone()).await?;
 
-            if acquired.is_none() {
+            // Attempt to acquire the lease
+            if !Self::try_acquire_lease(&mut redis, &lease_key).await? {
                 tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
                 continue;
             }
 
-            // We're the leader now: query Postgres and either populate the
-            // cache or, on a real miss, release the lease immediately
-            // rather than making everyone else wait out its full TTL for a
-            // question that's already been definitively answered.
-            self.postgres_queries.fetch_add(1, Ordering::Relaxed);
-            if !self.demo_query_delay.is_zero() {
-                tokio::time::sleep(self.demo_query_delay).await;
-            }
-            let row: Option<(String,)> = sqlx::query_as(
-                "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
-            )
-            .bind(code)
-            .fetch_optional(&self.pool)
-            .await?;
+            // We're the leader now. The lease is released on every way out
+            // of the block below -- a populated cache, a genuine miss, *or*
+            // a Postgres error -- rather than left to time out, so a failed
+            // query doesn't stall every waiter for the full lease TTL.
+            let outcome = self.rebuild(code, &mut redis).await;
+            redis.del::<_, ()>(&lease_key).await?;
+            return outcome;
+        }
+    }
 
-            return match row {
-                Some((url,)) => {
-                    redis.set_ex::<_, _, ()>(code, &url, CACHE_TTL_SECONDS).await?;
-                    redis.del::<_, ()>(&lease_key).await?;
-                    Ok(Some(url))
-                }
-                None => {
-                    redis.del::<_, ()>(&lease_key).await?;
-                    Ok(None)
-                }
-            };
+    /// The leader's half of a miss: query Postgres and, on a hit, populate
+    /// the cache. Only ever called while holding the code's lease.
+    async fn rebuild(
+        &self,
+        code: &str,
+        redis: &mut redis::aio::MultiplexedConnection,
+    ) -> Result<Option<String>, anyhow::Error> {
+        self.postgres_queries.fetch_add(1, Ordering::Relaxed);
+        if !self.demo_query_delay.is_zero() {
+            tokio::time::sleep(self.demo_query_delay).await;
+        }
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
+        )
+        .bind(code)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some((url,)) => {
+                redis.set_ex::<_, _, ()>(code, &url, CACHE_TTL_SECONDS).await?;
+                Ok(Some(url))
+            }
+            None => Ok(None),
         }
     }
 
@@ -415,5 +512,64 @@ mod tests {
             store.resolve(&code).await.unwrap(),
             Some("https://cached.example".to_string())
         );
+    }
+
+    /// A Redis wipe must not turn existing links into 404s: a fresh
+    /// `connect` backfills the Bloom filter from Postgres, so a code minted
+    /// before the wipe still passes the filter and resolves afterward.
+    #[tokio::test]
+    #[ignore]
+    async fn bloom_filter_survives_a_redis_flush() {
+        let store = test_store().await;
+        let code = store.shorten("https://survives.example".into()).await.unwrap();
+
+        let mut redis = test_redis().await;
+        let _: () = redis::cmd("FLUSHALL").query_async(&mut redis).await.unwrap();
+
+        let reconnected = test_store().await;
+        assert_eq!(
+            reconnected.resolve(&code).await.unwrap(),
+            Some("https://survives.example".to_string())
+        );
+    }
+
+    /// `update` must wait for the miss path's lease rather than racing it.
+    /// A lease held by "someone else" (set by hand with nothing behind it)
+    /// has to expire before the update can proceed, so the call takes at
+    /// least that long.
+    #[tokio::test]
+    #[ignore]
+    async fn update_waits_for_an_outstanding_lease() {
+        let store = test_store().await;
+        let code = store.shorten("https://before.example".into()).await.unwrap();
+
+        let mut redis = test_redis().await;
+        let opts = SetOptions::default()
+            .conditional_set(ExistenceCheck::NX)
+            .with_expiration(SetExpiry::EX(2));
+        let _: Option<String> = redis.set_options(lease_key(&code), 1, opts).await.unwrap();
+
+        let started = std::time::Instant::now();
+        assert!(store.update(&code, "https://after.example").await.unwrap());
+        assert!(
+            started.elapsed() >= Duration::from_millis(1500),
+            "update should have waited for the 2s lease, took {:?}",
+            started.elapsed()
+        );
+
+        assert_eq!(
+            store.resolve(&code).await.unwrap(),
+            Some("https://after.example".to_string())
+        );
+    }
+
+    async fn test_redis() -> redis::aio::MultiplexedConnection {
+        redis::Client::open(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6382".into()),
+        )
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap()
     }
 }
