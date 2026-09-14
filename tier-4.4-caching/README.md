@@ -2,10 +2,8 @@
 
 A copy of [Tier 4.3](../tier-4.3-caching/) plus three more mitigations. The
 lease (Tier 4.3) was the first and simplest; stale-while-revalidate was
-deliberately skipped; and XFetch — the textbook "probabilistic early
-recompute" — was built, found not to fit this system, and replaced by the
-simpler thing it reduces to here (see the keep-alive section for the full
-reasoning). These three layer on top of the lease rather than replacing it.
+deliberately skipped. These three layer on top of the lease rather than
+replacing it.
 
 ---
 
@@ -68,47 +66,31 @@ Two design choices worth understanding:
   traffic pauses for more than 30s expires, and its next burst is a miss —
   a lease-guarded, single-query miss, so not a stampede, but a miss.
 
-### Why this and not XFetch
+### Why extend the TTL instead of re-fetching
 
-This started as XFetch — the paper's "Optimal Probabilistic Cache Stampede
-Prevention": on a hit near expiry, probabilistically kick off a *real
-recompute* (the Postgres query) in the background, weighted by how long
-that recompute takes. It was built, and dropped, for three reasons that
-are worth more as class material than the technique itself:
+The obvious alternative is to use the same roll to trigger a *refresh* —
+re-query Postgres in the background and re-`SET` the value before it
+expires. That would cost a real query per trigger, and here it buys
+nothing:
 
-1. **It didn't work — a real bug.** The background refresh went through
-   `resolve_miss`, whose first line is "if the key is in Redis, return it."
-   XFetch fires *while the key is still alive* by definition, so every
-   refresh found the key, returned, and touched neither Postgres nor the
-   TTL. The key expired on schedule anyway. A live test showed exactly this
-   (`postgres_queries` stayed at 0 after a confirmed trigger, then the key
-   expired and a normal miss repopulated it) and was initially misread as
-   "the refresh lost the race against expiry." It hadn't raced anything.
-   No test exercised the path, which is why it went unnoticed — this tier
-   now has two that do.
-2. **The recompute buys nothing here.** `PATCH`/`DELETE` invalidate with an
-   explicit `DEL`, so for as long as a cached value lives it is identical to
-   Postgres by construction. Re-querying can't return anything different
-   from what's already cached. The entire benefit of XFetch is *when* the
-   refresh happens (before the synchronized miss), not *what* it fetches —
-   and that benefit is fully delivered by just moving the expiry.
-3. **XFetch is built for expensive recomputes.** Its `delta` (recompute
-   latency) sets how far before expiry to start. A PK lookup against a warm
-   local Postgres is ~1ms, so honest XFetch would only ever fire in the
-   last millisecond — the miss window for a cheap recompute is tiny, and so
-   is the stampede it prevents. It only visibly "worked" when
-   `DEMO_QUERY_DELAY_MS` inflated `delta` artificially.
-
-Strip the recompute out of XFetch and what's left is exactly the keep-alive
-above: the same exponential roll, but `EXPIRE` instead of a query, and
-`window` as an honest tuning knob instead of a latency estimate that was
-never really measured.
+- **The cached value can't have drifted.** `PATCH`/`DELETE` invalidate
+  with an explicit `DEL`, so for as long as a cached value lives it is
+  identical to Postgres by construction. Re-querying can't return anything
+  different from what's already cached.
+- **What matters is *when*, not *what*.** The whole point is that the key
+  never reaches a synchronized hard expiry. Moving the expiry delivers that
+  completely; fetching the same bytes again on the way adds only cost.
+- **A cheap recompute means a tiny stampede anyway.** A PK lookup against a
+  warm local Postgres is ~1ms, so the window in which concurrent readers
+  could pile up on a miss is ~1ms wide. A refresh-based scheme would have
+  almost nothing to prevent — and would have to start in that last
+  millisecond to do it.
 
 **What makes this sound**, and what would break it: it relies entirely on
 invalidation being explicit. If anything wrote Postgres *outside* this app
 (a manual migration, another service), a kept-alive hot key would serve
-the old value indefinitely — that's the case where XFetch's real recompute
-would earn its cost. And it relies on `allkeys-lfu` to bound memory, since
+the old value indefinitely — that's the case where a real re-fetch would
+earn its cost. And it relies on `allkeys-lfu` to bound memory, since
 kept-alive keys don't age out on their own.
 
 Verified with two tests: `sustained_reads_near_expiry_extend_ttl` (50 reads
@@ -170,10 +152,11 @@ upcoming chapter.
    expiry? Find the traffic rate below which a key is more likely to
    expire than not — that's the keep-alive's effective definition of
    "hot." Is it the definition you'd want?
-6. XFetch was dropped because a real recompute buys nothing when
-   invalidation is explicit. Name a system where the opposite holds — where
-   the cache *can't* be told about every write — and explain why the
-   keep-alive would be actively wrong there.
+6. The keep-alive extends rather than re-fetches because invalidation is
+   explicit — the cache is told about every write. Name a system where
+   that doesn't hold, where the cache *can't* be told about every write,
+   and explain why the keep-alive would be actively wrong there and a
+   background re-fetch would be the right call.
 
 **Previous:** [Tier 4.3 — Invalidation and a Lease](../tier-4.3-caching/README.md)
 

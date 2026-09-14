@@ -59,9 +59,9 @@
 //!   collects enough rolls for one to land, so a key has to earn its
 //!   extension with sustained traffic. Hot keys therefore never reach a
 //!   hard expiry and the synchronized miss that comes with it; cold keys
-//!   expire normally. This is what the textbook XFetch collapses into once
-//!   the recompute is cheap and invalidation is explicit -- see the README
-//!   for why a real recompute buys nothing here.
+//!   expire normally. Extending is enough -- no need to re-query Postgres
+//!   -- because the cached value can't have drifted from the row while it
+//!   lives; see the README.
 //! - **TTL jitter** (`jittered_ttl`): every `SET ... EX` gets a small random
 //!   addition on top of the base TTL, so keys written around the same time
 //!   don't also *expire* around the same time -- a different stampede

@@ -151,10 +151,10 @@ exactly what each one adds, the same discipline as the tiers themselves.
   touch Redis's lease. A probabilistic TTL keep-alive lets a cache *hit*
   near expiry push the key's TTL out by a small amount — the randomness
   acts as a hotness filter, so only keys with sustained traffic earn it
-  and never reach a hard expiry. It's what the textbook XFetch reduces to
-  once the recompute is cheap and invalidation is explicit; the README
-  walks through why a real recompute buys nothing here. TTL jitter spreads
-  out the *different* failure of many keys expiring in unison.
+  and never reach a hard expiry. Extending is enough — no re-query —
+  because explicit invalidation means a cached value can't drift from its
+  row; the README walks through why. TTL jitter spreads out the
+  *different* failure of many keys expiring in unison.
 
 **Deliberately not built:** stale-while-revalidate and a formal load test /
 sequence diagram of the failure remain discussion material — see each
