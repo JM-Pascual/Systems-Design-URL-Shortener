@@ -29,15 +29,15 @@
 //!
 //! # Why this tier is "naive"
 //!
-//! Three fatal problems, each fixed by a later tier:
+//! Three fatal problems:
 //!
 //! 1. **Volatile.** Restart the process and every short link ever created is
-//!    gone. -> Tier 3 (Postgres).
+//!    gone. -> fixed in Tier 3 (Postgres).
 //! 2. **Single process.** A second app server has its own map and its own
 //!    counter, so both would hand out the code `"5"` for different URLs.
-//!    -> Tier 5 (distributed ID generation).
-//! 3. **Bounded by RAM.** 50 GB/month of URLs (Tier 0's estimate) does not fit.
-//!    -> Tier 6 (sharding).
+//!    Left as an open problem -- the class ends at Tier 4.4.
+//! 3. **Bounded by RAM.** 50 GB/month of URLs (Tier 0's estimate) does not
+//!    fit. Also left as an open problem.
 
 use std::collections::HashMap;
 

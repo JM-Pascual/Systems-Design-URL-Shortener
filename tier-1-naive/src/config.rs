@@ -17,9 +17,10 @@
 //! twelve-factor rule — config that varies between deployments lives in the
 //! environment, not in the binary.
 //!
-//! It matters more from Tier 5 onward, where several app servers sit behind one
-//! load balancer: each one binds its own port but they must all mint links
-//! pointing at the shared public hostname.
+//! It would matter even more with several app servers behind one load
+//! balancer: each one binds its own port but they must all mint links
+//! pointing at the shared public hostname. This tier still only ever runs
+//! as one process.
 
 /// Everything the service needs to know that is not compiled into it.
 ///

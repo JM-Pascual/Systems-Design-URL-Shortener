@@ -61,7 +61,10 @@ you know is coming changes the design you choose today.
 | Expiration — `shorten(url, expires_at)` | Motivates a TTL column in the database (Tier 3), which maps naturally onto Redis TTLs (Tier 4). |
 | Edit destination — `PATCH /{code}` | **The important one.** It is the trigger for the cache-invalidation and thundering-herd work in Tier 4, and the reason we pick counter-based codes over hash-based ones in Tier 2. |
 | Delete / disable — `DELETE /{code}` | Same, plus it raises a genuinely hard question: what does a cache *hit* mean when the underlying row is gone? |
-| Click analytics — unique visitor counts | Motivates HyperLogLog (Tier 4) and the asynchronous pipeline (Tier 7). |
+
+Click analytics (unique visitor counts) was also considered and set aside —
+it's an analytics concern, not a read-path one, and isn't worked through as
+a chapter here.
 
 ---
 
@@ -94,8 +97,8 @@ storage: 100e6 rows/month · ~500 B/row   ≈ 50 GB/month
 
 Read those three numbers as a verdict: 40 writes/sec is nothing — one Postgres
 handles it without noticing. 4 000 reads/sec against a disk-backed B-tree is
-where it starts to hurt. **That gap is the course.** Tiers 3 through 6 are all
-attempts to close it.
+where it starts to hurt. **That gap is the course.** Tiers 3 and 4 are the
+attempt to close it — Tier 4 in particular.
 
 ### 3.2 Redirect latency is in a human's critical path
 
@@ -104,7 +107,8 @@ the redirect should add **under 10 ms** server-side.
 
 The useful consequence is a rule about what the redirect may *not* do. Anything
 synchronous — logging the click, checking a blocklist, writing analytics —
-spends that budget. That rule is what forces analytics onto a queue in Tier 7.
+spends that budget, which is why the class's redirect path never does any of
+that (see Tier 4's discussion of what stays out of the hot path).
 
 ### 3.3 We choose availability over strong consistency
 
@@ -168,7 +172,8 @@ the goal is to make the trade-off explicit, not to land on the same conclusion.
    ago? 5 minutes ago? Where do you draw the line — and what mechanism actually
    enforces the line you drew?
 5. Estimate storage after 5 years at 100M writes/month. Does it fit on one
-   machine? *(Keep your answer; it is the opening question of Tier 6.)*
+   machine? *(Keep your answer — it's a question the class raises but
+   doesn't go on to answer with a sharding chapter.)*
 
 ---
 
@@ -184,8 +189,13 @@ technology's own merits.
 | Durability across restarts (§2) | Tier 3 — Postgres |
 | 100:1 reads, <10 ms latency (§3.1, §3.2) | Tier 4 — Redis cache-aside |
 | Editable destinations (§2, optional) | Tier 4 — invalidation, thundering herd |
-| More than one app server (§3.1) | Tier 5 — distributed ID generation |
-| Availability over consistency (§3.3) | Tier 6 — replication, partitioning |
-| Redirect latency budget (§3.2) | Tier 7 — async analytics, rate limiting |
+
+Three requirements are named here but not cashed out in a chapter — left as
+open problems where the class ends, at Tier 4.4:
+
+- **More than one app server** (§3.1) — a shared counter across instances.
+- **Availability over consistency** (§3.3) — replication and partitioning.
+- **Redirect latency budget, fully realized** (§3.2) — async analytics and
+  rate limiting kept entirely off the hot path.
 
 **Next:** [Tier 1 — Naive Single-Server Solution](../tier-1-naive/README.md)

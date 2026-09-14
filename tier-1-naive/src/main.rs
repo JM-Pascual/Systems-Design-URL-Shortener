@@ -75,8 +75,9 @@ async fn shorten(
     Json(req): Json<ShortenRequest>,
 ) -> impl IntoResponse {
     // A real service would validate the URL here (scheme is http/https, host is
-    // present, not a link to ourselves). Tier 7 adds a blocklist check. Tier 1
-    // trusts its input, which is one more reason it is called "naive".
+    // present, not a link to ourselves), and would check it against a
+    // blocklist. Tier 1 trusts its input, which is one more reason it is
+    // called "naive".
     let code = state
         .store
         .lock()

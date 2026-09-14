@@ -111,10 +111,10 @@ requests against a cold key all resolve correctly with no errors or hangs.
 
 ## What breaks here
 
-| Problem | Addressed in |
+| Problem | Status |
 |---|---|
-| Still one Postgres `nextval()` sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Tier 5 — distributed ID generation |
-| The lease only protects a single Redis instance's view of a key. Once Tier 6 replicates Redis, a lease acquired against a primary that hasn't yet propagated to a replica is a new race. | Tier 6 — availability and partitioning |
+| Still one Postgres `nextval()` sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem — the class ends at Tier 4.4 |
+| The lease only protects a single Redis instance's view of a key. Replicating Redis for availability would mean a lease acquired against a primary that hasn't yet propagated to a replica is a new race. | Open problem |
 
 ---
 
@@ -142,4 +142,4 @@ requests against a cold key all resolve correctly with no errors or hangs.
    link goes viral for an hour and then is never touched again?
 
 **Previous:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md) ·
-**Next:** Tier 5 — distributed ID generation
+**Next:** [Tier 4.4 — Singleflight, XFetch, TTL Jitter](../tier-4.4-caching/README.md)

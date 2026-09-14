@@ -1,7 +1,10 @@
 # URL Shortener — A Systems Design Class
 
-One system, built eight times. Each iteration is broken in a specific,
-demonstrable way; the next one exists to fix it.
+One system, built in five iterations — the fourth broken into four
+incremental quarters. Each iteration is broken in a specific, demonstrable
+way; the next one exists to fix it, through Tier 4.4, where the class
+concludes. What Tier 4.4 still breaks is left as discussion material — see
+its README and `QUESTIONS.md` — not a promise of further chapters.
 
 **Language:** Rust (edition 2024, toolchain pinned in `rust-toolchain.toml`).
 **Infrastructure:** Docker Compose, from the third iteration onward.
@@ -59,9 +62,10 @@ Deferred, but designed for — each one forces a decision in a later iteration:
 | `shorten(url, expires_at)` | A TTL column, which maps onto Redis TTLs. |
 | `PATCH /{code}` — edit destination | Cache invalidation and the thundering herd. Also why codes come from a counter, not a hash. |
 | `DELETE /{code}` | What a cache *hit* means once the row is gone. |
-| Click analytics | HyperLogLog; the asynchronous pipeline. |
 
-Out of scope: accounts and authentication, a web UI, billing.
+Out of scope: accounts and authentication, a web UI, billing, click
+analytics, and rate limiting/abuse prevention — none of these are worked
+through as chapters here.
 
 ---
 
@@ -99,8 +103,8 @@ Also: sequential codes are enumerable, mitigated by a reversible permutation
 (coprime multiplication, XOR mask, or a small Feistel network) applied before
 encoding — preserving uniqueness while destroying the ordering.
 
-**Breaks:** a single shared counter is a bottleneck once there are multiple app
-servers (deferred to the fifth iteration).
+**Breaks:** a single shared counter is a bottleneck once there are multiple
+app servers — left as an open problem; see the discussion questions.
 
 ---
 
@@ -141,52 +145,24 @@ exactly what each one adds, the same discipline as the tiers themselves.
   crashes, leadership transfers to the next waiter the instant the lease
   expires — no request ever queries Postgres unguarded, and none can be
   blocked forever.
+- **[4.4 — singleflight, XFetch, TTL jitter](tier-4.4-caching/):** three more
+  mitigations layered on top of the lease. Singleflight coalesces concurrent
+  same-process misses onto one call, so followers never even touch Redis's
+  lease. XFetch makes a cache *hit* probabilistically trigger its own
+  background refresh as expiry approaches, so a hard miss becomes the
+  exception rather than routine. TTL jitter spreads out the *different*
+  failure of many keys expiring in unison.
 
-**Deliberately not built:** the more sophisticated herd mitigations
-(request coalescing beyond the lease, stale-while-revalidate, probabilistic
-early expiration, TTL jitter) and a formal load test / sequence diagram of
-the failure remain discussion material — see each folder's README and
-`QUESTIONS.md` — rather than code. The lease alone is enough to demonstrate
-and defend against the core failure.
+**Deliberately not built:** stale-while-revalidate and a formal load test /
+sequence diagram of the failure remain discussion material — see each
+folder's README and `QUESTIONS.md` — rather than code.
 
 **Breaks:** still one Postgres sequence and one Redis instance, both single
 points of failure, and the counter is a bottleneck once there's more than
-one app server. The lease itself only coordinates a single Redis instance —
-Tier 6's replication reopens a version of the same race.
-
----
-
-## Fifth iteration — distributed ID generation
-
-Four ways to remove the single-counter bottleneck, with their trade-offs:
-
-- **Redis `INCR`** — centralised, atomic, reuses infrastructure already present.
-- **Database auto-increment** — works, but makes the database a write bottleneck
-  and a single point of failure for ID generation.
-- **Pre-allocated ranges (ticket server)** — each instance leases a block, e.g.
-  `[5000, 6000)`, and hands out IDs locally.
-- **Snowflake** — timestamp + worker ID + local sequence, no coordination.
-
-**Breaks:** one Redis and one Postgres are both single points of failure.
-
----
-
-## Sixth iteration — availability and partitioning
-
-Redis primary-replica replication and the consistency it gives up. Consistent
-hashing, motivated by first showing that naive `hash(code) % N` reshards
-everything when a node joins or leaves. Database sharding by code range versus by
-hash.
-
----
-
-## Seventh iteration — analytics and abuse prevention *(optional)*
-
-Click analytics pushed onto a queue so logging stays outside the redirect latency
-budget: `INCR` for a raw per-code hit counter, HyperLogLog (`PFADD`/`PFCOUNT`) for
-unique-visitor estimates in constant memory. Rate limiting in Redis via a
-sliding-window `ZSET` or a token bucket. A Bloom filter rejecting known-malicious
-URLs on the write path without an external call in the hot path.
+one app server. The lease itself only coordinates a single Redis instance;
+replicating Redis for availability would reopen a version of the same race.
+These are where the class ends — left as open problems, not upcoming
+chapters.
 
 ---
 
@@ -243,12 +219,18 @@ whether or not there's code to go with it yet.
 
 ## Status
 
+**Complete.** Every planned iteration is either implemented and tested or,
+where noted, intentionally scoped as design-only.
+
 - [x] Requirements
 - [x] First iteration — naive in-memory
 - [x] Second iteration — code generation and collisions (design only, no code)
 - [x] Third iteration — persistence
-- [x] Fourth iteration, quarters 1–3 — cache-aside, Bloom filter, invalidation + lease
-- [ ] Fourth iteration — remaining herd mitigations (singleflight, stale-while-revalidate, XFetch, TTL jitter)
-- [ ] Fifth iteration — distributed ID generation
-- [ ] Sixth iteration — availability and partitioning
-- [ ] Seventh iteration — analytics and abuse prevention
+- [x] Fourth iteration, quarter 1 — cache-aside
+- [x] Fourth iteration, quarter 2 — Bloom filter
+- [x] Fourth iteration, quarter 3 — invalidation and a lease
+- [x] Fourth iteration, quarter 4 — singleflight, XFetch, TTL jitter
+
+Stale-while-revalidate, a formal load test, and a sequence diagram of the
+thundering herd remain deliberately unbuilt — see Tier 4's discussion
+questions and `QUESTIONS.md`.

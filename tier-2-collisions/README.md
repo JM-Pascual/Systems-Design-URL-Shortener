@@ -23,8 +23,9 @@ base62. This is the path the rest of the course carries forward.
   mask, or a small Feistel network) to the counter value *before* encoding —
   it preserves uniqueness while destroying the ordering.
 - **Requires a shared counter.** Every instance minting codes has to agree on
-  "what's next," which is fine with one process (Tier 1) and becomes the
-  problem Tier 5 exists to solve once there are several.
+  "what's next," which is fine with one process (Tier 1) and becomes a
+  genuine open problem once there are several — left unsolved here; the
+  class ends at Tier 4.4.
 
 ### Path B — truncated hash of the URL
 
@@ -94,16 +95,16 @@ keeps all of its costs (collision handling, retries) while losing the one
 benefit a counter-based scheme doesn't already have for free. Worth stating
 plainly: **for this system, Path A is strictly simpler and has no downside
 Path B doesn't also have** — Path B earns its keep specifically in a
-multi-writer setting with no shared counter, which is exactly what Tier 5
-tackles a different way.
+multi-writer setting with no shared counter, a problem the class doesn't go
+on to solve a different way.
 
 ---
 
 ## What breaks here
 
-| Problem | Fixed in |
+| Problem | Status |
 |---|---|
-| A single shared counter (Path A) is a bottleneck once there are multiple app servers. | Tier 5 — distributed ID generation |
+| A single shared counter (Path A) is a bottleneck once there are multiple app servers. | Open problem — the class ends at Tier 4.4 |
 
 ---
 

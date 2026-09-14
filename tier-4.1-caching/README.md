@@ -58,11 +58,11 @@ felt the failure it's fixing.
 
 ## What breaks here
 
-| Problem | Addressed in |
+| Problem | Status |
 |---|---|
-| A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Tier 4.2 — Bloom filter |
-| No coordination on a cache-miss stampede (thundering herd). | A later Tier 4.N |
-| Still one counter in one process. | Tier 5 — distributed ID generation |
+| A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Fixed in Tier 4.2 — Bloom filter |
+| No coordination on a cache-miss stampede (thundering herd). | Fixed in Tier 4.3 — a lease |
+| Still one counter in one process. | Open problem — the class ends at Tier 4.4 |
 
 ---
 

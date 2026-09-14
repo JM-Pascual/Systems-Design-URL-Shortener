@@ -96,16 +96,16 @@ built entirely on that property. Tier 2 makes the argument properly.
 
 ## What is broken here (i.e. the rest of the class)
 
-| Problem | Symptom you can demo | Fixed in |
+| Problem | Symptom you can demo | Status |
 |---|---|---|
-| **Volatile** | `curl` a link, `Ctrl-C` the server, restart, `curl` again → 404 | Tier 3 — Postgres |
-| **Single process** | Start two servers on ports 3000 and 3001. Both hand out code `"0"` for different URLs. | Tier 5 — distributed IDs |
-| **Bounded by RAM** | Tier 0 estimated 50 GB/month of URLs. | Tier 6 — sharding |
-| **One global mutex** | Every request, reads included, serialises behind one lock. | Tier 4 — shared cache |
-| **Enumerable codes** | `curl localhost:3000/0`, `/1`, `/2`, … walks the entire database. | Tier 2 — permutation |
+| **Volatile** | `curl` a link, `Ctrl-C` the server, restart, `curl` again → 404 | Fixed in Tier 3 — Postgres |
+| **Single process** | Start two servers on ports 3000 and 3001. Both hand out code `"0"` for different URLs. | Open problem — the class ends at Tier 4.4 |
+| **Bounded by RAM** | Tier 0 estimated 50 GB/month of URLs. | Open problem |
+| **One global mutex** | Every request, reads included, serialises behind one lock. | Fixed in Tier 4 — shared cache |
+| **Enumerable codes** | `curl localhost:3000/0`, `/1`, `/2`, … walks the entire database. | Fixed in Tier 2 — permutation |
 
-Try the first one now — it takes ten seconds and it is the motivation for the
-next two tiers.
+Try the first one now — it takes ten seconds and it is the motivation for
+Tier 3.
 
 ---
 
