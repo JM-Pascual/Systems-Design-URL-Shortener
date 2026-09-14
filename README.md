@@ -145,13 +145,16 @@ exactly what each one adds, the same discipline as the tiers themselves.
   crashes, leadership transfers to the next waiter the instant the lease
   expires — no request ever queries Postgres unguarded, and none can be
   blocked forever.
-- **[4.4 — singleflight, XFetch, TTL jitter](tier-4.4-caching/):** three more
-  mitigations layered on top of the lease. Singleflight coalesces concurrent
-  same-process misses onto one call, so followers never even touch Redis's
-  lease. XFetch makes a cache *hit* probabilistically trigger its own
-  background refresh as expiry approaches, so a hard miss becomes the
-  exception rather than routine. TTL jitter spreads out the *different*
-  failure of many keys expiring in unison.
+- **[4.4 — singleflight, TTL keep-alive, TTL jitter](tier-4.4-caching/):**
+  three more mitigations layered on top of the lease. Singleflight coalesces
+  concurrent same-process misses onto one call, so followers never even
+  touch Redis's lease. A probabilistic TTL keep-alive lets a cache *hit*
+  near expiry push the key's TTL out by a small amount — the randomness
+  acts as a hotness filter, so only keys with sustained traffic earn it
+  and never reach a hard expiry. It's what the textbook XFetch reduces to
+  once the recompute is cheap and invalidation is explicit; the README
+  walks through why a real recompute buys nothing here. TTL jitter spreads
+  out the *different* failure of many keys expiring in unison.
 
 **Deliberately not built:** stale-while-revalidate and a formal load test /
 sequence diagram of the failure remain discussion material — see each
@@ -229,7 +232,7 @@ where noted, intentionally scoped as design-only.
 - [x] Fourth iteration, quarter 1 — cache-aside
 - [x] Fourth iteration, quarter 2 — Bloom filter
 - [x] Fourth iteration, quarter 3 — invalidation and a lease
-- [x] Fourth iteration, quarter 4 — singleflight, XFetch, TTL jitter
+- [x] Fourth iteration, quarter 4 — singleflight, TTL keep-alive, TTL jitter
 
 Stale-while-revalidate, a formal load test, and a sequence diagram of the
 thundering herd remain deliberately unbuilt — see Tier 4's discussion

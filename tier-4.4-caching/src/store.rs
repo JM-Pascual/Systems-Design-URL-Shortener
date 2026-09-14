@@ -38,7 +38,7 @@
 //! still falls through to Postgres and correctly gets `None`; the code just
 //! permanently loses the filter's fast-path benefit.
 //!
-//! # Quarter 4: singleflight, XFetch, and TTL jitter
+//! # Quarter 4: singleflight, a TTL keep-alive, and TTL jitter
 //!
 //! Three more mitigations layered onto the lease, each addressing a
 //! different angle of the same failure:
@@ -50,18 +50,29 @@
 //!   followers await that one call's result directly, never touching Redis
 //!   at all. This only coordinates within one process; multiple app
 //!   instances still rely on the lease to coordinate with each other.
-//! - **XFetch** (`xfetch_should_recompute`): a cache *hit* now also checks
-//!   the key's remaining TTL and, with a probability that rises as expiry
-//!   approaches, kicks off a background refresh via that same singleflight
-//!   path -- while still returning the current (still valid) cached value
-//!   immediately. Done well, the value gets refreshed before the real TTL
-//!   ever lapses, so the hard-miss-and-stampede case this whole file exists
-//!   to defend against becomes rare instead of routine.
+//! - **TTL keep-alive** (`should_extend_ttl`): a cache *hit* also reads the
+//!   key's remaining TTL and, with a probability that rises as expiry
+//!   approaches, extends it by a small fixed amount (`EXPIRE`) -- no
+//!   Postgres involved. The randomness isn't there to spread out an
+//!   expensive operation (`EXPIRE` is free and idempotent); it's a
+//!   *hotness filter*: only a key with enough reads inside the window
+//!   collects enough rolls for one to land, so a key has to earn its
+//!   extension with sustained traffic. Hot keys therefore never reach a
+//!   hard expiry and the synchronized miss that comes with it; cold keys
+//!   expire normally. This is what the textbook XFetch collapses into once
+//!   the recompute is cheap and invalidation is explicit -- see the README
+//!   for why a real recompute buys nothing here.
 //! - **TTL jitter** (`jittered_ttl`): every `SET ... EX` gets a small random
 //!   addition on top of the base TTL, so keys written around the same time
 //!   don't also *expire* around the same time -- a different stampede
 //!   shape than one hot key's lease: many different keys going cold in
 //!   unison.
+//!
+//! The keep-alive is only sound because `update`/`delete` invalidate with
+//! an explicit `DEL`: a cached value is identical to Postgres for as long
+//! as it lives, so extending its life never serves anything stale. If
+//! anything wrote Postgres *outside* this app, a kept-alive hot key would
+//! never notice.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,21 +118,33 @@ const CODES_BLOOM_KEY: &str = "codes_bloom";
 const BLOOM_ERROR_RATE: f64 = 0.01;
 const BLOOM_CAPACITY: i64 = 1_000_000;
 
-/// XFetch's tuning knob -- 1.0 is the standard default from the original
-/// paper ("Optimal Probabilistic Cache Stampede Prevention"). Raising it
-/// makes early recomputation more aggressive (triggers further from the
-/// real expiry); lowering it moves closer to plain lazy expiration.
-const XFETCH_BETA: f64 = 1.0;
+/// How close to expiry a key has to be before reads start rolling for an
+/// extension. The per-read chance is `e^(-remaining / window)`: negligible
+/// while `remaining` is many windows away, ~37% at exactly one window out,
+/// climbing toward certainty as `remaining` approaches zero. Wider window =
+/// extensions start earlier and a key needs less traffic to earn one.
+const TTL_EXTEND_WINDOW_SECONDS: f64 = 5.0;
 
-/// Floor for XFetch's estimate of how long a recompute takes. A real
-/// deployment would measure this empirically (e.g. a rolling average of
-/// actual query latency) rather than hardcode it; this floor just ensures a
-/// fresh process with no measured latency still gets *some* early-refresh
-/// behavior instead of none. When `DEMO_QUERY_DELAY_MS` is set, that
-/// simulated latency is used directly instead -- a slower simulated backend
-/// makes XFetch trigger earlier, which is the correct, demonstrable
-/// property.
-const XFETCH_MIN_DELTA_SECONDS: f64 = 0.05;
+/// What a successful roll sets the remaining TTL *to* (not adds -- `EXPIRE`
+/// fixes the remaining time, it doesn't accumulate). Deliberately much
+/// shorter than `CACHE_TTL_SECONDS`: a single lucky read buys a hot key
+/// this much more life, not a whole fresh lifetime, so a key's survival
+/// tracks its recent traffic closely. The cost: a hot key whose traffic
+/// pauses for longer than this expires, and its next burst is a (lease-
+/// guarded) miss.
+const TTL_EXTENSION_SECONDS: u64 = 30;
+
+/// The keep-alive's roll: extend if `window * -ln(rand)` has already
+/// exceeded the time remaining until expiry. `rand` is sampled from
+/// `(0, 1)` (never exactly 0, which would make `-ln` infinite), so
+/// `-ln(rand)` is exponentially distributed with mean 1 -- which makes the
+/// per-read chance `e^(-remaining / window)`: effectively zero far from
+/// expiry, climbing sharply as `remaining_ttl_secs` shrinks. See
+/// `TTL_EXTEND_WINDOW_SECONDS`.
+fn should_extend_ttl(remaining_ttl_secs: f64) -> bool {
+    let r: f64 = rand::thread_rng().gen_range(f64::EPSILON..1.0);
+    TTL_EXTEND_WINDOW_SECONDS * (-r.ln()) >= remaining_ttl_secs
+}
 
 /// A cell shared by every same-process caller coalesced onto one
 /// `resolve_miss` call for a given code. The error side of the `Result`
@@ -139,14 +162,13 @@ pub struct Store {
     /// thundering-herd demo's `/metrics` endpoint: this is exactly the
     /// count the lease is supposed to keep near 1 per stampede, versus
     /// Tier 4.1's version where it tracks concurrent request count. `Arc`
-    /// so every `Store::clone()` (needed for `tokio::spawn`'s background
-    /// XFetch refresh) shares the same counter rather than starting a new
+    /// so every `Store::clone()` (handlers and tests that `tokio::spawn`
+    /// concurrent work) shares the same counter rather than starting a new
     /// one at zero.
     postgres_queries: Arc<AtomicU64>,
     /// See Tier 4.1's `Store` for why this exists: simulates a realistically
     /// slow backend query so a local demo's miss window is wide enough for
-    /// concurrent requests to actually land inside it. Also feeds XFetch's
-    /// recompute-cost estimate -- see `XFETCH_MIN_DELTA_SECONDS`.
+    /// concurrent requests to actually land inside it.
     demo_query_delay: Duration,
     /// Singleflight: codes currently being rebuilt by *this* process. See
     /// the module doc's Quarter 4 section.
@@ -317,13 +339,13 @@ impl Store {
 
     /// Look up the long URL for a code.
     ///
-    /// A hit also feeds XFetch: alongside the value, `resolve` pulls the
-    /// key's remaining TTL (one pipelined round trip, not two), and with a
-    /// probability that rises the closer that TTL is to zero, kicks off a
-    /// *background* refresh while still returning the current value
-    /// immediately -- the caller never waits on it. A miss falls through to
-    /// the Bloom filter check and then the lease-guarded, singleflight-
-    /// coalesced rebuild in `resolve_miss`.
+    /// A hit also runs the keep-alive: alongside the value, `resolve` pulls
+    /// the key's remaining TTL (one pipelined, atomic round trip, not two),
+    /// and if `should_extend_ttl` rolls true, pushes the expiry out by
+    /// `TTL_EXTENSION_SECONDS` inline -- a single `EXPIRE`, cheap enough
+    /// that there's nothing to background. A miss falls through to the
+    /// Bloom filter check and then the lease-guarded, singleflight-coalesced
+    /// rebuild in `resolve_miss`.
     pub async fn resolve(&self, code: &str) -> Result<Option<String>, anyhow::Error> {
         let mut redis = self.redis.clone();
 
@@ -335,8 +357,10 @@ impl Store {
             .await?;
 
         if let Some(url) = value {
-            if ttl > 0 && self.xfetch_should_recompute(ttl as f64) {
-                self.spawn_background_refresh(code);
+            if ttl > 0 && should_extend_ttl(ttl as f64) {
+                redis
+                    .expire::<_, ()>(code, TTL_EXTENSION_SECONDS as i64)
+                    .await?;
             }
             return Ok(Some(url));
         }
@@ -346,35 +370,6 @@ impl Store {
         }
 
         self.resolve_miss_coalesced(code).await
-    }
-
-    /// XFetch's coin flip: recompute now if `delta * beta * -ln(rand)` has
-    /// already exceeded the time remaining until expiry. `rand` is sampled
-    /// from `(0, 1)` (never exactly 0, which would make `-ln` infinite) so
-    /// every read has *some* chance, and that chance climbs sharply as
-    /// `remaining_ttl_secs` shrinks toward zero.
-    fn xfetch_should_recompute(&self, remaining_ttl_secs: f64) -> bool {
-        let delta = self
-            .demo_query_delay
-            .as_secs_f64()
-            .max(XFETCH_MIN_DELTA_SECONDS);
-        let r: f64 = rand::thread_rng().gen_range(f64::EPSILON..1.0);
-        delta * XFETCH_BETA * (-r.ln()) >= remaining_ttl_secs
-    }
-
-    /// Fires an XFetch-triggered refresh without making the triggering
-    /// reader wait on it. Routed through the same singleflight path as a
-    /// real miss, so multiple concurrent hits that all roll "recompute now"
-    /// still only trigger one rebuild, not one per reader.
-    fn spawn_background_refresh(&self, code: &str) {
-        let store = self.clone();
-        let code = code.to_string();
-        tokio::spawn(async move {
-            // Best-effort: a failed background refresh just means the next
-            // reader falls through to a normal miss instead. Nothing to
-            // report it to.
-            let _ = store.resolve_miss_coalesced(&code).await;
-        });
     }
 
     /// Singleflight: collapse every concurrent same-process call for this
@@ -578,14 +573,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut redis = redis::Client::open(
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6383".into()),
-        )
-        .unwrap()
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
-        let _: () = redis::AsyncCommands::del(&mut redis, &code).await.unwrap();
+        let mut redis = test_redis().await;
+        let _: () = redis.del(&code).await.unwrap();
 
         let before = store.postgres_query_count();
         let mut handles = Vec::new();
@@ -603,5 +592,71 @@ mod tests {
         let after = store.postgres_query_count();
 
         assert_eq!(after - before, 1, "singleflight should collapse all 20 misses into 1 query");
+    }
+
+    /// The keep-alive's positive case: a key inside the extension window
+    /// that keeps getting read has its expiry pushed out -- without any
+    /// Postgres query. 50 reads at 3s remaining (window 5s => ~55% per read)
+    /// leaves a ~1e-17 chance of no extension, so this is deterministic in
+    /// practice.
+    #[tokio::test]
+    #[ignore]
+    async fn sustained_reads_near_expiry_extend_ttl() {
+        let store = test_store().await;
+        let code = store.shorten("https://keepalive.example".into()).await.unwrap();
+
+        let mut redis = test_redis().await;
+        let _: () = redis.expire(&code, 3).await.unwrap();
+
+        let before = store.postgres_query_count();
+        for _ in 0..50 {
+            assert_eq!(
+                store.resolve(&code).await.unwrap(),
+                Some("https://keepalive.example".to_string())
+            );
+        }
+
+        let ttl: i64 = redis.ttl(&code).await.unwrap();
+        assert!(
+            ttl > 3 && ttl <= TTL_EXTENSION_SECONDS as i64,
+            "expected TTL extended to ~{TTL_EXTENSION_SECONDS}s, got {ttl}"
+        );
+        assert_eq!(
+            store.postgres_query_count() - before,
+            0,
+            "a keep-alive must never touch Postgres"
+        );
+    }
+
+    /// The keep-alive's negative case: reads far from expiry don't extend
+    /// anything. At ~300s remaining with a 5s window the per-read chance is
+    /// e^-60 -- the TTL must still be its original (jittered) value, not
+    /// reset down to `TTL_EXTENSION_SECONDS`.
+    #[tokio::test]
+    #[ignore]
+    async fn reads_far_from_expiry_do_not_extend_ttl() {
+        let store = test_store().await;
+        let code = store.shorten("https://fresh.example".into()).await.unwrap();
+
+        for _ in 0..50 {
+            store.resolve(&code).await.unwrap();
+        }
+
+        let mut redis = test_redis().await;
+        let ttl: i64 = redis.ttl(&code).await.unwrap();
+        assert!(
+            ttl > TTL_EXTENSION_SECONDS as i64,
+            "TTL should still be near the full base value, got {ttl}"
+        );
+    }
+
+    async fn test_redis() -> redis::aio::MultiplexedConnection {
+        redis::Client::open(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6383".into()),
+        )
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap()
     }
 }

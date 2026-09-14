@@ -96,8 +96,8 @@ relying on that argument. See `QUESTIONS.md`.
 
 This is deliberately the first, simplest mitigation from the root README's
 list ("a distributed lock: `SET key val NX EX ttl`"), not the most
-sophisticated one (singleflight, stale-while-revalidate, and XFetch are all
-still ahead). It's also the one that generalizes to trigger #3 above:
+sophisticated one (singleflight and a TTL keep-alive are still ahead in
+Tier 4.4). It's also the one that generalizes to trigger #3 above:
 `PATCH`'s plain `DEL` and a TTL lapsing look identical from `resolve`'s
 point of view — both are just "the key isn't there anymore" — so the same
 lease defends against both without knowing which one happened.
@@ -142,4 +142,4 @@ requests against a cold key all resolve correctly with no errors or hangs.
    link goes viral for an hour and then is never touched again?
 
 **Previous:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md) ·
-**Next:** [Tier 4.4 — Singleflight, XFetch, TTL Jitter](../tier-4.4-caching/README.md)
+**Next:** [Tier 4.4 — Singleflight, TTL Keep-Alive, TTL Jitter](../tier-4.4-caching/README.md)
