@@ -1,131 +1,39 @@
-//! The cache-aside store: Redis in front of the Postgres `links` table from
-//! Tier 3.
-//!
-//! # Cache-aside, concretely
-//!
-//! `resolve` (the redirect path, ~99% of traffic per Tier 0) does:
-//! 1. `GET` the code from Redis.
-//! 2. On a hit, return it — no Postgres involved at all.
-//! 3. On a miss, `SELECT` from Postgres (Tier 3's query, unchanged), then
-//!    `SET` the result into Redis with a TTL before returning it.
-//!
-//! `shorten` writes through: after the `INSERT` (Tier 3's, unchanged), it
-//! also `SET`s the new mapping into Redis, so a code's *first* redirect is
-//! already a cache hit instead of paying one guaranteed miss.
-//!
-//! # Quarter 2: a Bloom filter for the negative case
-//!
-//! Before this, a `resolve` for a code that never existed cost a full
-//! Postgres query *every single time* — there was no way to cache "this
-//! definitely doesn't exist." A Bloom filter fixes that cheaply: `shorten`
-//! adds every minted code to it, and `resolve` checks it on a Redis miss,
-//! *before* touching Postgres. A Bloom filter can never false-negative (if
-//! it says absent, the code truly was never minted) but can rarely
-//! false-positive (says "maybe present" for a code that isn't) — which is
-//! exactly the safe direction to be wrong in: a false positive costs one
-//! wasted Postgres query, a false negative would incorrectly 404 a real
-//! link.
-//!
-//! That guarantee only holds if the filter actually contains every code.
-//! Two things protect it: `shorten` adds to the filter *before* the
-//! `INSERT` (so a partial failure can only produce a harmless false
-//! positive, never a false negative), and `connect` backfills the filter
-//! from Postgres on every start (so a Redis restart or flush can't turn
-//! every existing link into a 404).
-//!
-//! # Quarter 3: PATCH/DELETE, and a lease against the thundering herd
-//!
-//! `update` and `delete` both write Postgres first (same durability
-//! discipline as `shorten`), then invalidate with a plain Redis `DEL` --
-//! deliberately the simple, stampede-prone approach from the README, since
-//! it's the concrete trigger `resolve`'s lease exists to defend against.
-//! They also *hold* that lease while they do it: every write to a code's
-//! cache entry, rebuild or invalidation, serializes on `lease:{code}`, so
-//! an invalidation can't land in the middle of a rebuild and get its
-//! `DEL` overwritten by a `SET` of the value it just made stale.
-//!
-//! A deleted code is never removed from the Bloom filter -- standard Bloom
-//! filters have no removal operation. That's harmless, not a bug: `resolve`
-//! still falls through to Postgres and correctly gets `None`; the code just
-//! permanently loses the filter's fast-path benefit.
-//!
-//! # Quarter 4: singleflight, a TTL keep-alive, and TTL jitter
-//!
-//! Three more mitigations layered onto the lease, each addressing a
-//! different angle of the same failure:
-//!
-//! - **Singleflight** (`inflight`): the lease still costs a Redis round trip
-//!   per follower to discover they lost the race. Within one process,
-//!   concurrent `resolve` misses for the *same* code now collapse into a
-//!   single call to `resolve_miss` via a shared `tokio::sync::OnceCell` --
-//!   followers await that one call's result directly, never touching Redis
-//!   at all. This only coordinates within one process; multiple app
-//!   instances still rely on the lease to coordinate with each other.
-//! - **TTL keep-alive** (`should_extend_ttl`): a cache *hit* also reads the
-//!   key's remaining TTL and, with a probability that rises as expiry
-//!   approaches, extends it by a small fixed amount (`EXPIRE`) -- no
-//!   Postgres involved. The randomness isn't there to spread out an
-//!   expensive operation (`EXPIRE` is free and idempotent); it's a
-//!   *hotness filter*: only a key with enough reads inside the window
-//!   collects enough rolls for one to land, so a key has to earn its
-//!   extension with sustained traffic. Hot keys therefore never reach a
-//!   hard expiry and the synchronized miss that comes with it; cold keys
-//!   expire normally. Extending is enough -- no need to re-query Postgres
-//!   -- because the cached value can't have drifted from the row while it
-//!   lives; see the README.
-//! - **TTL jitter** (`jittered_ttl`): every `SET ... EX` gets a small random
-//!   addition on top of the base TTL, so keys written around the same time
-//!   don't also *expire* around the same time -- a different stampede
-//!   shape than one hot key's lease: many different keys going cold in
-//!   unison.
-//!
-//! The keep-alive is only sound because `update`/`delete` invalidate with
-//! an explicit `DEL`: a cached value is identical to Postgres for as long
-//! as it lives, so extending its life never serves anything stale. If
-//! anything wrote Postgres *outside* this app, a kept-alive hot key would
-//! never notice.
+//! Tier 4.3's store plus singleflight, a TTL keep-alive and TTL jitter. See
+//! this tier's README.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rand::Rng;
 use redis::AsyncCommands;
-use redis::{ExistenceCheck, SetExpiry, SetOptions};
-use sqlx::{PgPool, Row};
+use sqlx::postgres::PgArguments;
+use sqlx::query::Query;
+use sqlx::{PgPool, Postgres};
 use tokio::sync::OnceCell;
 
 use crate::base62;
 
 /// Base TTL for a cached mapping, before jitter. Arbitrary for a teaching
-/// build; a real deployment would tune this against how often `PATCH`/
-/// `DELETE` make a cached value stale.
+/// build; a real deployment would tune it against how often links change.
 const CACHE_TTL_SECONDS: u64 = 300;
 
-/// Upper bound on the random addition to `CACHE_TTL_SECONDS`. Every write
-/// gets `CACHE_TTL_SECONDS + [0, CACHE_TTL_JITTER_SECONDS)`, so keys minted
+/// Upper bound on the random addition to `CACHE_TTL_SECONDS`, so keys minted
 /// close together don't also expire close together.
 const CACHE_TTL_JITTER_SECONDS: u64 = 30;
 
-/// How long a resolve lease is held before another request is allowed to
-/// try acquiring it -- an upper bound on how long a crashed leader can block
-/// everyone else from ever rebuilding this key.
+/// Upper bound on how long a crashed lease holder can block everyone else.
 const LEASE_TTL_SECONDS: u64 = 5;
 
-/// How long a lease loser waits before its next attempt -- either the real
-/// key will be populated by then, or the current lease will have expired
-/// and this attempt becomes the new leader.
+/// How long a request waits before trying for the lease again.
 const LEASE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The RedisBloom key holding every code that's ever been minted.
 const CODES_BLOOM_KEY: &str = "codes_bloom";
 
 /// Target false-positive rate and initial capacity for `BF.RESERVE`.
-/// RedisBloom scales the filter automatically past this capacity, at the
-/// cost of a slightly higher false-positive rate for the overflow — fine
-/// for a teaching build; a production one would size this from Tier 0's
-/// actual key-space estimate instead of a round number.
+/// RedisBloom grows the filter automatically past this capacity.
 const BLOOM_ERROR_RATE: f64 = 0.01;
 const BLOOM_CAPACITY: i64 = 1_000_000;
 
@@ -133,199 +41,127 @@ const BLOOM_CAPACITY: i64 = 1_000_000;
 const BLOOM_BACKFILL_CHUNK: usize = 1_000;
 
 /// How close to expiry a key has to be before reads start rolling for an
-/// extension. The per-read chance is `e^(-remaining / window)`: negligible
-/// while `remaining` is many windows away, ~37% at exactly one window out,
-/// climbing toward certainty as `remaining` approaches zero. Wider window =
-/// extensions start earlier and a key needs less traffic to earn one.
+/// extension. See `should_extend_ttl`.
 const TTL_EXTEND_WINDOW_SECONDS: f64 = 5.0;
 
-/// What a successful roll sets the remaining TTL *to* (not adds -- `EXPIRE`
-/// fixes the remaining time, it doesn't accumulate). Deliberately much
-/// shorter than `CACHE_TTL_SECONDS`: a single lucky read buys a hot key
-/// this much more life, not a whole fresh lifetime, so a key's survival
-/// tracks its recent traffic closely. The cost: a hot key whose traffic
-/// pauses for longer than this expires, and its next burst is a (lease-
-/// guarded) miss.
-const TTL_EXTENSION_SECONDS: u64 = 30;
+/// What a successful roll sets the remaining TTL *to*. Much shorter than
+/// `CACHE_TTL_SECONDS`, so a key's survival tracks its recent traffic.
+const TTL_EXTENSION_SECONDS: i64 = 30;
 
-/// The Redis key guarding all writes to a code's cache entry -- the miss
-/// path's rebuild and `update`/`delete`'s invalidation alike.
 fn lease_key(code: &str) -> String {
     format!("lease:{code}")
 }
 
-/// The keep-alive's roll: extend if `window * -ln(rand)` has already
-/// exceeded the time remaining until expiry. `rand` is sampled from
-/// `(0, 1)` (never exactly 0, which would make `-ln` infinite), so
-/// `-ln(rand)` is exponentially distributed with mean 1 -- which makes the
-/// per-read chance `e^(-remaining / window)`: effectively zero far from
-/// expiry, climbing sharply as `remaining_ttl_secs` shrinks. See
-/// `TTL_EXTEND_WINDOW_SECONDS`.
+fn jittered_ttl() -> u64 {
+    CACHE_TTL_SECONDS + rand::thread_rng().gen_range(0..CACHE_TTL_JITTER_SECONDS)
+}
+
+/// The keep-alive's roll. `-ln(rand)` is exponentially distributed with mean
+/// 1, so the per-read chance is `e^(-remaining / window)`: effectively zero
+/// far from expiry, climbing sharply as the TTL shrinks. `rand` is never
+/// exactly 0, which would make `-ln` infinite.
 fn should_extend_ttl(remaining_ttl_secs: f64) -> bool {
     let r: f64 = rand::thread_rng().gen_range(f64::EPSILON..1.0);
     TTL_EXTEND_WINDOW_SECONDS * (-r.ln()) >= remaining_ttl_secs
 }
 
-/// A cell shared by every same-process caller coalesced onto one
-/// `resolve_miss` call for a given code. The error side of the `Result`
-/// (`OnceCell::get_or_try_init`'s `E`) is `Arc<anyhow::Error>`, not
-/// `anyhow::Error` directly, because `anyhow::Error` isn't `Clone` and every
-/// waiter needs its own copy of the same outcome.
-type InflightCell = OnceCell<Option<String>>;
-
-#[derive(Clone)]
 pub struct Store {
     pool: PgPool,
+    /// Cheap to clone per use: every clone multiplexes the same connection.
     redis: redis::aio::MultiplexedConnection,
-    /// How many times `resolve` has actually queried Postgres -- i.e. how
-    /// many times a request became the lease's *leader*. For the
-    /// thundering-herd demo's `/metrics` endpoint: this is exactly the
-    /// count the lease is supposed to keep near 1 per stampede, versus
-    /// Tier 4.1's version where it tracks concurrent request count. `Arc`
-    /// so every `Store::clone()` (handlers and tests that `tokio::spawn`
-    /// concurrent work) shares the same counter rather than starting a new
-    /// one at zero.
-    postgres_queries: Arc<AtomicU64>,
-    /// See Tier 4.1's `Store` for why this exists: simulates a realistically
-    /// slow backend query so a local demo's miss window is wide enough for
-    /// concurrent requests to actually land inside it.
+    /// How many times `resolve` has queried Postgres, for `/metrics`. This is
+    /// the exact thing a stampede spikes.
+    postgres_queries: AtomicU64,
+    /// From `DEMO_QUERY_DELAY_MS`: a real local query is too fast for a demo's
+    /// concurrent requests to land inside the miss window, so
+    /// `../thundering-herd-demo/` simulates a slow one.
     demo_query_delay: Duration,
-    /// Singleflight: codes currently being rebuilt by *this* process. See
-    /// the module doc's Quarter 4 section.
-    inflight: Arc<StdMutex<HashMap<String, Arc<InflightCell>>>>,
-}
-
-/// A generic dump of a table's rows, column names discovered at query time
-/// rather than hardcoded — so `/stats` keeps working as the schema evolves.
-pub struct TableDump {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Option<String>>>,
+    /// Singleflight: codes currently being rebuilt by *this* process.
+    inflight: Mutex<HashMap<String, Arc<OnceCell<Option<String>>>>>,
 }
 
 impl Store {
     /// Connect to Postgres (running pending migrations) and Redis, and make
-    /// sure the codes Bloom filter exists *and reflects every code Postgres
-    /// already has*.
-    ///
-    /// The backfill is what keeps the filter honest across a Redis restart
-    /// or flush. Without it, an empty filter would answer "definitely not
-    /// minted" for every link Postgres still holds -- turning a cache
-    /// outage into every existing link 404ing. `BF.ADD` is idempotent, so
-    /// re-adding codes an existing filter already has is harmless.
-    pub async fn connect(database_url: &str, redis_url: &str) -> Result<Self, anyhow::Error> {
+    /// sure the Bloom filter exists and holds every code Postgres has. Without
+    /// the backfill, a wiped Redis would turn every existing link into a 404.
+    pub async fn connect(database_url: &str, redis_url: &str) -> anyhow::Result<Self> {
         let pool = PgPool::connect(database_url).await?;
         sqlx::migrate!().run(&pool).await?;
 
-        let client = redis::Client::open(redis_url)?;
-        let mut redis = client.get_multiplexed_async_connection().await?;
+        let mut redis = redis::Client::open(redis_url)?
+            .get_multiplexed_async_connection()
+            .await?;
 
-        // `BF.RESERVE` errors if the filter already exists (from a previous
-        // run against the same Redis) -- that's expected on every restart
-        // but the first one, so it's the one error we swallow here.
-        match redis::cmd("BF.RESERVE")
+        // `BF.RESERVE` errors if the filter survives from a previous run,
+        // which is expected on every start but the first.
+        if let Err(e) = redis::cmd("BF.RESERVE")
             .arg(CODES_BLOOM_KEY)
             .arg(BLOOM_ERROR_RATE)
             .arg(BLOOM_CAPACITY)
             .query_async::<()>(&mut redis)
             .await
+            && !e.to_string().contains("item exists")
         {
-            Ok(()) => {}
-            Err(e) if e.to_string().contains("item exists") => {}
-            Err(e) => return Err(e.into()),
+            return Err(e.into());
         }
 
-        let codes: Vec<(String,)> = sqlx::query_as("SELECT code FROM links")
+        let codes: Vec<String> = sqlx::query_scalar("SELECT code FROM links")
             .fetch_all(&pool)
             .await?;
         for chunk in codes.chunks(BLOOM_BACKFILL_CHUNK) {
-            let mut cmd = redis::cmd("BF.MADD");
-            cmd.arg(CODES_BLOOM_KEY);
-            for (code,) in chunk {
-                cmd.arg(code);
-            }
-            cmd.query_async::<Vec<i64>>(&mut redis).await?;
+            redis::cmd("BF.MADD")
+                .arg(CODES_BLOOM_KEY)
+                .arg(chunk)
+                .query_async::<()>(&mut redis)
+                .await?;
         }
 
-        let demo_query_delay = Duration::from_millis(
-            std::env::var("DEMO_QUERY_DELAY_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-        );
+        let demo_query_delay_ms = std::env::var("DEMO_QUERY_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         Ok(Self {
             pool,
             redis,
-            postgres_queries: Arc::new(AtomicU64::new(0)),
-            demo_query_delay,
-            inflight: Arc::new(StdMutex::new(HashMap::new())),
+            postgres_queries: AtomicU64::new(0),
+            demo_query_delay: Duration::from_millis(demo_query_delay_ms),
+            inflight: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Total Postgres queries `resolve` has issued since this process
-    /// started. Used only by the `/metrics` endpoint.
     pub fn postgres_query_count(&self) -> u64 {
         self.postgres_queries.load(Ordering::Relaxed)
     }
 
-    /// `CACHE_TTL_SECONDS` plus a random addition -- see the module doc's
-    /// TTL jitter note.
-    fn jittered_ttl(&self) -> u64 {
-        CACHE_TTL_SECONDS + rand::thread_rng().gen_range(0..CACHE_TTL_JITTER_SECONDS)
-    }
-
-    /// Add a code to the Bloom filter. Called once, when `shorten` mints it.
-    async fn bloom_add(&self, code: &str) -> Result<(), anyhow::Error> {
-        let mut redis = self.redis.clone();
-        redis::cmd("BF.ADD")
+    /// `false` means the code was *never* minted, so Postgres can be skipped.
+    /// `true` means "probably", and still needs the real check.
+    async fn bloom_might_exist(&self, code: &str) -> anyhow::Result<bool> {
+        Ok(redis::cmd("BF.EXISTS")
             .arg(CODES_BLOOM_KEY)
             .arg(code)
-            .query_async::<i64>(&mut redis)
-            .await?;
-        Ok(())
-    }
-
-    /// `false` means the code was *never* minted -- safe to skip Postgres
-    /// entirely. `true` means "probably", and still needs the real check.
-    async fn bloom_might_exist(&self, code: &str) -> Result<bool, anyhow::Error> {
-        let mut redis = self.redis.clone();
-        let exists: i64 = redis::cmd("BF.EXISTS")
-            .arg(CODES_BLOOM_KEY)
-            .arg(code)
-            .query_async(&mut redis)
-            .await?;
-        Ok(exists == 1)
+            .query_async(&mut self.redis.clone())
+            .await?)
     }
 
     /// Store a long URL and return the freshly minted short code.
     ///
-    /// `self.redis.clone()` below isn't a network call — `MultiplexedConnection`
-    /// is designed to be cloned per use, the same way `PgPool` hands out a
-    /// connection per query. That's what lets `shorten`/`resolve` take `&self`
-    /// instead of `&mut self`, so `Store` stays shareable across concurrent
-    /// requests without a `Mutex`, exactly like Tier 3.
-    ///
-    /// Two Redis writes here, and they sit on *opposite* sides of the
-    /// `INSERT` on purpose, because their failure modes point in opposite
-    /// directions:
-    ///
-    /// - The Bloom filter is written **before** the `INSERT`. If the filter
-    ///   gains a code whose `INSERT` then fails, that's a false positive --
-    ///   one wasted Postgres query on a future miss, harmless. If instead
-    ///   the `INSERT` committed and the `BF.ADD` then failed, that's a false
-    ///   negative -- the filter says "never minted" and `resolve` 404s a
-    ///   real link. So the filter goes first.
-    /// - The value cache is written **after** the `INSERT`. Writing it first
-    ///   would make a code externally resolvable before its row is durably
-    ///   committed, so a failed `INSERT` after a successful `SET` would leave
-    ///   Redis pointing at a URL Postgres never actually has.
-    pub async fn shorten(&self, url: String) -> Result<String, anyhow::Error> {
-        let (id,): (i64,) = sqlx::query_as("SELECT nextval('link_ids')")
+    /// The two Redis writes sit on opposite sides of the `INSERT` on purpose:
+    /// a code in the filter whose `INSERT` fails is a harmless false positive,
+    /// while a cached value whose `INSERT` fails would resolve a link Postgres
+    /// never had.
+    pub async fn shorten(&self, url: String) -> anyhow::Result<String> {
+        let id: i64 = sqlx::query_scalar("SELECT nextval('link_ids')")
             .fetch_one(&self.pool)
             .await?;
         let code = base62::encode(id as u64);
+        let mut redis = self.redis.clone();
 
-        self.bloom_add(&code).await?;
+        redis::cmd("BF.ADD")
+            .arg(CODES_BLOOM_KEY)
+            .arg(&code)
+            .query_async::<()>(&mut redis)
+            .await?;
 
         sqlx::query("INSERT INTO links (code, long_url) VALUES ($1, $2)")
             .bind(&code)
@@ -333,115 +169,70 @@ impl Store {
             .execute(&self.pool)
             .await?;
 
-        let mut redis = self.redis.clone();
         redis
-            .set_ex::<_, _, ()>(&code, &url, self.jittered_ttl())
+            .set_ex::<_, _, ()>(&code, &url, jittered_ttl())
             .await?;
 
         Ok(code)
     }
 
-    /// One `SET lease:{code} 1 NX EX` attempt. `true` means this caller now
-    /// holds the lease; `false` means someone else does.
-    async fn try_acquire_lease(
-        redis: &mut redis::aio::MultiplexedConnection,
-        lease_key: &str,
-    ) -> Result<bool, anyhow::Error> {
-        let options = SetOptions::default()
-            .conditional_set(ExistenceCheck::NX)
-            .with_expiration(SetExpiry::EX(LEASE_TTL_SECONDS));
-        let acquired: Option<String> = redis.set_options(lease_key, 1, options).await?;
+    /// One `SET lease:{code} 1 NX EX ttl` attempt. `true` means this caller
+    /// now holds the lease.
+    async fn try_acquire_lease(&self, code: &str) -> anyhow::Result<bool> {
+        let acquired: Option<String> = redis::cmd("SET")
+            .arg(lease_key(code))
+            .arg(1)
+            .arg("NX")
+            .arg("EX")
+            .arg(LEASE_TTL_SECONDS)
+            .query_async(&mut self.redis.clone())
+            .await?;
         Ok(acquired.is_some())
     }
 
-    /// Block until the lease is ours. Used by the invalidating writes,
-    /// which -- unlike the miss path -- have no cached value to return
-    /// early with, so they just wait their turn.
-    async fn acquire_lease(
-        redis: &mut redis::aio::MultiplexedConnection,
-        lease_key: &str,
-    ) -> Result<(), anyhow::Error> {
-        while !Self::try_acquire_lease(redis, lease_key).await? {
+    /// Change a code's destination. `false` means no such code.
+    pub async fn update(&self, code: &str, url: &str) -> anyhow::Result<bool> {
+        let query = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
+            .bind(code)
+            .bind(url);
+        self.write_and_invalidate(code, query).await
+    }
+
+    /// Remove a code entirely. `false` means no such code.
+    pub async fn delete(&self, code: &str) -> anyhow::Result<bool> {
+        let query = sqlx::query("DELETE FROM links WHERE code = $1").bind(code);
+        self.write_and_invalidate(code, query).await
+    }
+
+    /// Run a write, then drop the cached value, holding the lease across both.
+    /// Without it, a rebuild that `SELECT`ed the old URL could `SET` it back
+    /// right after this `DEL`, stale for a full TTL.
+    async fn write_and_invalidate(
+        &self,
+        code: &str,
+        query: Query<'_, Postgres, PgArguments>,
+    ) -> anyhow::Result<bool> {
+        while !self.try_acquire_lease(code).await? {
             tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
         }
-        Ok(())
-    }
 
-    /// Change a code's destination. Returns `false` if the code doesn't
-    /// exist (caller turns that into a 404).
-    ///
-    /// Takes the same lease the miss path does. Without it there's a
-    /// classic cache-aside race: a `resolve` leader `SELECT`s the *old* URL,
-    /// this `UPDATE` + `DEL` land in between, and the leader then `SET`s the
-    /// old URL back -- stale for a full TTL. Holding the lease across the
-    /// `UPDATE` and the `DEL` means a rebuild can't be mid-flight while the
-    /// row changes underneath it.
-    ///
-    /// Within the lease: Postgres first, same reasoning as `shorten` -- only
-    /// invalidate the cache once the new value is durably committed.
-    /// Invalidation is a plain `DEL`, not a write-through `SET`; see the
-    /// module doc for why that's the point, not an oversight.
-    pub async fn update(&self, code: &str, url: &str) -> Result<bool, anyhow::Error> {
         let mut redis = self.redis.clone();
-        let lease_key = lease_key(code);
-        Self::acquire_lease(&mut redis, &lease_key).await?;
-
         let outcome = async {
-            let result = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
-                .bind(code)
-                .bind(url)
-                .execute(&self.pool)
-                .await?;
-            if result.rows_affected() == 0 {
-                return Ok(false);
+            let found = query.execute(&self.pool).await?.rows_affected() > 0;
+            if found {
+                redis.del::<_, ()>(code).await?;
             }
-            redis.del::<_, ()>(code).await?;
-            Ok(true)
+            Ok(found)
         }
         .await;
 
-        redis.del::<_, ()>(&lease_key).await?;
+        redis.del::<_, ()>(lease_key(code)).await?;
         outcome
     }
 
-    /// Remove a code entirely. Returns `false` if it didn't exist.
-    ///
-    /// Without the `DEL` here, a deleted link would keep redirecting
-    /// successfully -- serving a cached URL for a row that no longer
-    /// exists -- until its TTL happened to lapse on its own. Lease-guarded
-    /// for the same reason as `update`.
-    pub async fn delete(&self, code: &str) -> Result<bool, anyhow::Error> {
-        let mut redis = self.redis.clone();
-        let lease_key = lease_key(code);
-        Self::acquire_lease(&mut redis, &lease_key).await?;
-
-        let outcome = async {
-            let result = sqlx::query("DELETE FROM links WHERE code = $1")
-                .bind(code)
-                .execute(&self.pool)
-                .await?;
-            if result.rows_affected() == 0 {
-                return Ok(false);
-            }
-            redis.del::<_, ()>(code).await?;
-            Ok(true)
-        }
-        .await;
-
-        redis.del::<_, ()>(&lease_key).await?;
-        outcome
-    }
-
-    /// Look up the long URL for a code.
-    ///
-    /// A hit also runs the keep-alive: alongside the value, `resolve` pulls
-    /// the key's remaining TTL (one pipelined, atomic round trip, not two),
-    /// and if `should_extend_ttl` rolls true, pushes the expiry out by
-    /// `TTL_EXTENSION_SECONDS` inline -- a single `EXPIRE`, cheap enough
-    /// that there's nothing to background. A miss falls through to the
-    /// Bloom filter check and then the lease-guarded, singleflight-coalesced
-    /// rebuild in `resolve_miss`.
-    pub async fn resolve(&self, code: &str) -> Result<Option<String>, anyhow::Error> {
+    /// Look up the long URL for a code. A hit also rolls for the keep-alive;
+    /// a miss goes through the Bloom filter, then the coalesced rebuild.
+    pub async fn resolve(&self, code: &str) -> anyhow::Result<Option<String>> {
         let mut redis = self.redis.clone();
 
         let (value, ttl): (Option<String>, i64) = redis::pipe()
@@ -453,9 +244,7 @@ impl Store {
 
         if let Some(url) = value {
             if ttl > 0 && should_extend_ttl(ttl as f64) {
-                redis
-                    .expire::<_, ()>(code, TTL_EXTENSION_SECONDS as i64)
-                    .await?;
+                redis.expire::<_, ()>(code, TTL_EXTENSION_SECONDS).await?;
             }
             return Ok(Some(url));
         }
@@ -467,129 +256,84 @@ impl Store {
         self.resolve_miss_coalesced(code).await
     }
 
-    /// Singleflight: collapse every concurrent same-process call for this
-    /// code onto a single `resolve_miss`, so followers never touch Redis's
-    /// lease at all -- they just await the same in-memory result the first
-    /// caller is already producing.
-    async fn resolve_miss_coalesced(&self, code: &str) -> Result<Option<String>, anyhow::Error> {
-        let cell = {
-            let mut inflight = self.inflight.lock().expect("inflight mutex poisoned");
-            inflight
-                .entry(code.to_string())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
-        };
+    /// Singleflight: every concurrent same-process call for this code shares
+    /// one `resolve_miss`, so followers never touch Redis's lease at all.
+    async fn resolve_miss_coalesced(&self, code: &str) -> anyhow::Result<Option<String>> {
+        let cell = self
+            .inflight
+            .lock()
+            .expect("inflight mutex poisoned")
+            .entry(code.to_string())
+            .or_default()
+            .clone();
 
         let outcome = cell
-            .get_or_try_init(|| async { self.resolve_miss(code).await.map_err(Arc::new) })
+            .get_or_try_init(|| self.resolve_miss(code))
             .await
-            .map(Clone::clone);
+            .cloned();
 
-        // Remove our entry so the *next* stampede on this code (after this
-        // one settles) gets a fresh cell -- a `OnceCell` can only ever
-        // initialize once, so reusing this one would permanently freeze the
-        // code's cached value at whatever this call produced.
+        // A `OnceCell` only initializes once, so keeping it would freeze this
+        // code's value forever. The next stampede gets a fresh one.
         self.inflight
             .lock()
             .expect("inflight mutex poisoned")
             .remove(code);
 
-        outcome.map_err(|e| anyhow::anyhow!(e.to_string()))
+        outcome
     }
 
-    /// Rebuild a code's cache entry: Tier 4.3's lease loop, unchanged in
-    /// substance. Reached only through `resolve_miss_coalesced` now, so at
-    /// most one task per process is ever inside this function for a given
-    /// code at a time -- everything below it (the Redis lease) is what
-    /// coordinates *across* processes, on top of that.
-    async fn resolve_miss(&self, code: &str) -> Result<Option<String>, anyhow::Error> {
+    /// Whoever gets the lease rebuilds; everyone else sleeps and tries again,
+    /// for the lease itself and not just the key. If the holder crashes, its
+    /// lease expires and the next waiter takes over, so no request ever queries
+    /// Postgres unguarded and none is blocked forever.
+    async fn resolve_miss(&self, code: &str) -> anyhow::Result<Option<String>> {
         let mut redis = self.redis.clone();
-        let lease_key = lease_key(code);
 
         loop {
             if let Some(url) = redis.get::<_, Option<String>>(code).await? {
                 return Ok(Some(url));
             }
 
-            if !Self::try_acquire_lease(&mut redis, &lease_key).await? {
-                tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
-                continue;
+            if self.try_acquire_lease(code).await? {
+                // Released on every outcome, so a failed query doesn't stall
+                // every waiter for the full lease TTL.
+                let outcome = self.rebuild(code).await;
+                redis.del::<_, ()>(lease_key(code)).await?;
+                return outcome;
             }
 
-            // We're the leader now. The lease is released on every way out
-            // of the block below -- a populated cache, a genuine miss, *or*
-            // a Postgres error -- rather than left to time out, so a failed
-            // query doesn't stall every waiter for the full lease TTL.
-            let outcome = self.rebuild(code, &mut redis).await;
-            redis.del::<_, ()>(&lease_key).await?;
-            return outcome;
+            tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
         }
     }
 
-    /// The leader's half of a miss: query Postgres and, on a hit, populate
-    /// the cache. Only ever called while holding the code's lease.
-    async fn rebuild(
-        &self,
-        code: &str,
-        redis: &mut redis::aio::MultiplexedConnection,
-    ) -> Result<Option<String>, anyhow::Error> {
+    /// Query Postgres and, on a hit, populate the cache.
+    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
         self.postgres_queries.fetch_add(1, Ordering::Relaxed);
-        if !self.demo_query_delay.is_zero() {
-            tokio::time::sleep(self.demo_query_delay).await;
-        }
-        let row: Option<(String,)> = sqlx::query_as(
+        tokio::time::sleep(self.demo_query_delay).await;
+
+        let url: Option<String> = sqlx::query_scalar(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(code)
         .fetch_optional(&self.pool)
         .await?;
 
-        match row {
-            Some((url,)) => {
-                redis
-                    .set_ex::<_, _, ()>(code, &url, self.jittered_ttl())
-                    .await?;
-                Ok(Some(url))
-            }
-            None => Ok(None),
+        if let Some(url) = &url {
+            self.redis
+                .clone()
+                .set_ex::<_, _, ()>(code, url, jittered_ttl())
+                .await?;
         }
+
+        Ok(url)
     }
 
-    /// A literal `SELECT * FROM links` for the `/stats` endpoint. Unchanged
-    /// from Tier 3 — this tier's new idea is the read path, not `/stats`.
-    pub async fn dump_links(&self) -> Result<TableDump, sqlx::Error> {
-        let columns: Vec<(String,)> = sqlx::query_as(
-            "SELECT column_name FROM information_schema.columns \
-             WHERE table_schema = 'public' AND table_name = 'links' \
-             ORDER BY ordinal_position",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let columns: Vec<String> = columns.into_iter().map(|(c,)| c).collect();
-
-        let select_list = columns
-            .iter()
-            .map(|c| format!("{c}::text"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!("SELECT {select_list} FROM links ORDER BY code");
-
-        // `query` is built from `information_schema` column names, never
-        // from caller input, so this dynamic string can't carry an
-        // injection — hence the explicit `AssertSqlSafe` opt-in.
-        let pg_rows = sqlx::query(sqlx::AssertSqlSafe(query))
+    /// Every link, for the `/stats` endpoint. Postgres only: it doesn't reflect
+    /// what's currently cached.
+    pub async fn dump_links(&self) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as("SELECT code, long_url FROM links ORDER BY code")
             .fetch_all(&self.pool)
-            .await?;
-        let rows = pg_rows
-            .iter()
-            .map(|row| {
-                (0..columns.len())
-                    .map(|i| row.get::<Option<String>, _>(i))
-                    .collect()
-            })
-            .collect();
-
-        Ok(TableDump { columns, rows })
+            .await
     }
 }
 
@@ -609,6 +353,16 @@ mod tests {
         Store::connect(&database_url, &redis_url)
             .await
             .expect("connect to test database/redis")
+    }
+
+    async fn test_redis() -> redis::aio::MultiplexedConnection {
+        redis::Client::open(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6383".into()),
+        )
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -641,123 +395,39 @@ mod tests {
         assert_eq!(store.resolve("does-not-exist").await.unwrap(), None);
     }
 
-    /// The property this tier adds: a code resolves correctly even if it
-    /// was never touched again after `shorten` wrote it through to Redis —
-    /// i.e. resolving doesn't depend on a prior cache miss populating it.
+    /// The property this tier adds: `shorten` writes through, so the first
+    /// `resolve` is a cache hit and never queries Postgres.
     #[tokio::test]
     #[ignore]
     async fn resolve_hits_cache_without_a_prior_miss() {
         let store = test_store().await;
-        let code = store.shorten("https://cached.example".into()).await.unwrap();
-        // If `shorten` writes through correctly, this is a cache hit, not a
-        // Postgres query -- there is no way to assert that from here without
-        // instrumentation, but the point stands for a demo with redis-cli.
+        let code = store
+            .shorten("https://cached.example".into())
+            .await
+            .unwrap();
         assert_eq!(
             store.resolve(&code).await.unwrap(),
             Some("https://cached.example".to_string())
         );
+        assert_eq!(store.postgres_query_count(), 0);
     }
 
-    /// Quarter 4's property: many concurrent same-process misses for the
-    /// same code collapse into one Postgres query, via singleflight, not
-    /// just "eventually converge" via the lease's retry loop.
-    #[tokio::test]
-    #[ignore]
-    async fn concurrent_misses_singleflight_to_one_query() {
-        let store = test_store().await;
-        let code = store
-            .shorten("https://singleflight.example".into())
-            .await
-            .unwrap();
-
-        let mut redis = test_redis().await;
-        let _: () = redis.del(&code).await.unwrap();
-
-        let before = store.postgres_query_count();
-        let mut handles = Vec::new();
-        for _ in 0..20 {
-            let store = store.clone();
-            let code = code.clone();
-            handles.push(tokio::spawn(async move { store.resolve(&code).await }));
-        }
-        for h in handles {
-            assert_eq!(
-                h.await.unwrap().unwrap(),
-                Some("https://singleflight.example".to_string())
-            );
-        }
-        let after = store.postgres_query_count();
-
-        assert_eq!(after - before, 1, "singleflight should collapse all 20 misses into 1 query");
-    }
-
-    /// The keep-alive's positive case: a key inside the extension window
-    /// that keeps getting read has its expiry pushed out -- without any
-    /// Postgres query. 50 reads at 3s remaining (window 5s => ~55% per read)
-    /// leaves a ~1e-17 chance of no extension, so this is deterministic in
-    /// practice.
-    #[tokio::test]
-    #[ignore]
-    async fn sustained_reads_near_expiry_extend_ttl() {
-        let store = test_store().await;
-        let code = store.shorten("https://keepalive.example".into()).await.unwrap();
-
-        let mut redis = test_redis().await;
-        let _: () = redis.expire(&code, 3).await.unwrap();
-
-        let before = store.postgres_query_count();
-        for _ in 0..50 {
-            assert_eq!(
-                store.resolve(&code).await.unwrap(),
-                Some("https://keepalive.example".to_string())
-            );
-        }
-
-        let ttl: i64 = redis.ttl(&code).await.unwrap();
-        assert!(
-            ttl > 3 && ttl <= TTL_EXTENSION_SECONDS as i64,
-            "expected TTL extended to ~{TTL_EXTENSION_SECONDS}s, got {ttl}"
-        );
-        assert_eq!(
-            store.postgres_query_count() - before,
-            0,
-            "a keep-alive must never touch Postgres"
-        );
-    }
-
-    /// The keep-alive's negative case: reads far from expiry don't extend
-    /// anything. At ~300s remaining with a 5s window the per-read chance is
-    /// e^-60 -- the TTL must still be its original (jittered) value, not
-    /// reset down to `TTL_EXTENSION_SECONDS`.
-    #[tokio::test]
-    #[ignore]
-    async fn reads_far_from_expiry_do_not_extend_ttl() {
-        let store = test_store().await;
-        let code = store.shorten("https://fresh.example".into()).await.unwrap();
-
-        for _ in 0..50 {
-            store.resolve(&code).await.unwrap();
-        }
-
-        let mut redis = test_redis().await;
-        let ttl: i64 = redis.ttl(&code).await.unwrap();
-        assert!(
-            ttl > TTL_EXTENSION_SECONDS as i64,
-            "TTL should still be near the full base value, got {ttl}"
-        );
-    }
-
-    /// A Redis wipe must not turn existing links into 404s: a fresh
-    /// `connect` backfills the Bloom filter from Postgres, so a code minted
-    /// before the wipe still passes the filter and resolves afterward.
+    /// A Redis wipe must not turn existing links into 404s: a fresh `connect`
+    /// backfills the Bloom filter from Postgres.
     #[tokio::test]
     #[ignore]
     async fn bloom_filter_survives_a_redis_flush() {
         let store = test_store().await;
-        let code = store.shorten("https://survives.example".into()).await.unwrap();
+        let code = store
+            .shorten("https://survives.example".into())
+            .await
+            .unwrap();
 
         let mut redis = test_redis().await;
-        let _: () = redis::cmd("FLUSHALL").query_async(&mut redis).await.unwrap();
+        let _: () = redis::cmd("FLUSHALL")
+            .query_async(&mut redis)
+            .await
+            .unwrap();
 
         let reconnected = test_store().await;
         assert_eq!(
@@ -766,21 +436,27 @@ mod tests {
         );
     }
 
-    /// `update` must wait for the miss path's lease rather than racing it.
-    /// A lease held by "someone else" (set by hand with nothing behind it)
-    /// has to expire before the update can proceed, so the call takes at
-    /// least that long.
+    /// `update` must wait for the miss path's lease rather than racing it. A
+    /// lease held by "someone else" (set by hand) has to expire first.
     #[tokio::test]
     #[ignore]
     async fn update_waits_for_an_outstanding_lease() {
         let store = test_store().await;
-        let code = store.shorten("https://before.example".into()).await.unwrap();
+        let code = store
+            .shorten("https://before.example".into())
+            .await
+            .unwrap();
 
         let mut redis = test_redis().await;
-        let opts = SetOptions::default()
-            .conditional_set(ExistenceCheck::NX)
-            .with_expiration(SetExpiry::EX(2));
-        let _: Option<String> = redis.set_options(lease_key(&code), 1, opts).await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(lease_key(&code))
+            .arg(1)
+            .arg("NX")
+            .arg("EX")
+            .arg(2)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
 
         let started = std::time::Instant::now();
         assert!(store.update(&code, "https://after.example").await.unwrap());
@@ -796,13 +472,92 @@ mod tests {
         );
     }
 
-    async fn test_redis() -> redis::aio::MultiplexedConnection {
-        redis::Client::open(
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6383".into()),
-        )
-        .unwrap()
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap()
+    /// Many concurrent same-process misses collapse into one Postgres query
+    /// via singleflight, not just "eventually converge" via the lease's loop.
+    #[tokio::test]
+    #[ignore]
+    async fn concurrent_misses_singleflight_to_one_query() {
+        let store = Arc::new(test_store().await);
+        let code = store
+            .shorten("https://singleflight.example".into())
+            .await
+            .unwrap();
+
+        let mut redis = test_redis().await;
+        let _: () = redis.del(&code).await.unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let store = Arc::clone(&store);
+            let code = code.clone();
+            handles.push(tokio::spawn(async move { store.resolve(&code).await }));
+        }
+        for h in handles {
+            assert_eq!(
+                h.await.unwrap().unwrap(),
+                Some("https://singleflight.example".to_string())
+            );
+        }
+
+        assert_eq!(
+            store.postgres_query_count(),
+            1,
+            "singleflight should collapse all 20 misses into 1 query"
+        );
+    }
+
+    /// The keep-alive's positive case: a key inside the extension window that
+    /// keeps getting read has its expiry pushed out, with no Postgres query.
+    /// 50 reads at 3s remaining (~55% per read) leaves a ~1e-17 chance of no
+    /// extension.
+    #[tokio::test]
+    #[ignore]
+    async fn sustained_reads_near_expiry_extend_ttl() {
+        let store = test_store().await;
+        let code = store
+            .shorten("https://keepalive.example".into())
+            .await
+            .unwrap();
+
+        let mut redis = test_redis().await;
+        let _: () = redis.expire(&code, 3).await.unwrap();
+
+        for _ in 0..50 {
+            assert_eq!(
+                store.resolve(&code).await.unwrap(),
+                Some("https://keepalive.example".to_string())
+            );
+        }
+
+        let ttl: i64 = redis.ttl(&code).await.unwrap();
+        assert!(
+            ttl > 3 && ttl <= TTL_EXTENSION_SECONDS,
+            "expected TTL extended to ~{TTL_EXTENSION_SECONDS}s, got {ttl}"
+        );
+        assert_eq!(
+            store.postgres_query_count(),
+            0,
+            "a keep-alive must never touch Postgres"
+        );
+    }
+
+    /// The keep-alive's negative case: at ~300s remaining the per-read chance
+    /// is e^-60, so the TTL must not be reset down to the extension.
+    #[tokio::test]
+    #[ignore]
+    async fn reads_far_from_expiry_do_not_extend_ttl() {
+        let store = test_store().await;
+        let code = store.shorten("https://fresh.example".into()).await.unwrap();
+
+        for _ in 0..50 {
+            store.resolve(&code).await.unwrap();
+        }
+
+        let mut redis = test_redis().await;
+        let ttl: i64 = redis.ttl(&code).await.unwrap();
+        assert!(
+            ttl > TTL_EXTENSION_SECONDS,
+            "TTL should still be near the full base value, got {ttl}"
+        );
     }
 }

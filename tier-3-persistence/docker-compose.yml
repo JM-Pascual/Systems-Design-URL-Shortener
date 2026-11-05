@@ -1,5 +1,5 @@
 # Local Postgres for this tier. `docker compose up -d` inside this folder,
-# then point the app at it with DATABASE_URL (see .env.example / README).
+# then point the app at it with DATABASE_URL (see README).
 services:
   postgres:
     image: postgres:17-alpine

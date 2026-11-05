@@ -31,9 +31,8 @@
 //! values *cannot* produce the same code. Uniqueness is guaranteed by
 //! construction, not by luck. That is why Tier 2 calls this "Path A".
 
-// `decode` is not called by `main.rs` in this tier -- only by the tests and,
-// from Tier 2 onward, by code that needs to reverse a code back to its
-// counter value. Without this the compiler rightly warns it is dead.
+// `decode` is not called by `main.rs`, only by the tests: it is here to prove
+// the encoding is reversible. Without this the compiler rightly warns it is dead.
 #![allow(dead_code)]
 
 /// The base62 alphabet. Index `i` in this slice is the digit with value `i`.
@@ -46,9 +45,6 @@ const ALPHABET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN
 const BASE: u64 = 62;
 
 /// The error returned when a string is not valid base62.
-///
-/// We define a real error type rather than returning `Option` so the HTTP
-/// layer can tell the two failure modes apart in a 400 response.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Base62Error {
     /// A character outside the base62 alphabet, e.g. `'-'` or `'!'`.
@@ -68,19 +64,17 @@ pub enum Base62Error {
 /// ```
 pub fn encode(mut n: u64) -> String {
     if n == 0 {
-        return String::from("0")
+        return String::from("0");
     }
 
-    let mut encoded_chars: Vec<u8> = Vec::new();
-    
+    let mut digits = Vec::new();
     while n > 0 {
-        let next_char: u8 = ALPHABET[n as usize % 62];
-        encoded_chars.push(next_char);
-        n = n / BASE
+        digits.push(ALPHABET[(n % BASE) as usize]);
+        n /= BASE;
     }
 
-    encoded_chars.reverse();
-    return String::from_utf8(encoded_chars).expect("Alphabet is ASCII"); 
+    digits.reverse();
+    String::from_utf8(digits).expect("alphabet is ASCII")
 }
 
 /// Decode a base62 string back into a `u64`.
@@ -91,13 +85,13 @@ pub fn encode(mut n: u64) -> String {
 pub fn decode(s: &str) -> Result<u64, Base62Error> {
     let mut n: u64 = 0;
     for b in s.bytes() {
-        let value: u64 = match ALPHABET.iter().position(|&a| a == b) {
-            Some(idx) => idx as u64,
-            None => return Err(Base62Error::InvalidCharacter(b as char)),
-        };
+        let value = ALPHABET
+            .iter()
+            .position(|&a| a == b)
+            .ok_or(Base62Error::InvalidCharacter(b as char))?;
         n = n
             .checked_mul(BASE)
-            .and_then(|x| x.checked_add(value))
+            .and_then(|x| x.checked_add(value as u64))
             .ok_or(Base62Error::Overflow)?;
     }
 

@@ -9,6 +9,5 @@ axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
 sqlx.workspace = true
-chrono.workspace = true
 redis.workspace = true
 anyhow.workspace = true

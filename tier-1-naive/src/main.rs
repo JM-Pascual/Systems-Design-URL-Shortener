@@ -141,7 +141,7 @@ async fn main() {
     let config = Config::from_env();
 
     let state = Arc::new(AppState {
-        store: Mutex::new(Store::new()),
+        store: Mutex::new(Store::default()),
         config,
     });
 

@@ -18,19 +18,12 @@
 //! violation. Callers (`main.rs`) now have to decide what an HTTP client
 //! sees when that happens.
 
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::base62;
 
 pub struct Store {
     pool: PgPool,
-}
-
-/// A generic dump of a table's rows, column names discovered at query time
-/// rather than hardcoded — so `/stats` keeps working as the schema evolves.
-pub struct TableDump {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Option<String>>>,
 }
 
 impl Store {
@@ -52,7 +45,7 @@ impl Store {
     /// encoded its in-memory counter — same algorithm, different source of
     /// truth for "what's next."
     pub async fn shorten(&self, url: String) -> Result<String, sqlx::Error> {
-        let (id,): (i64,) = sqlx::query_as("SELECT nextval('link_ids')")
+        let id: i64 = sqlx::query_scalar("SELECT nextval('link_ids')")
             .fetch_one(&self.pool)
             .await?;
         let code = base62::encode(id as u64);
@@ -69,53 +62,20 @@ impl Store {
     /// Look up the long URL for a code, `None` if it doesn't exist (or has
     /// expired — see the README's discussion question on that query).
     pub async fn resolve(&self, code: &str) -> Result<Option<String>, sqlx::Error> {
-        let row: Option<(String,)> = sqlx::query_as(
+        sqlx::query_scalar(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(code)
         .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|(url,)| url))
+        .await
     }
 
-    /// A literal `SELECT * FROM links` for the `/stats` endpoint, with every
-    /// column cast to `text` so heterogeneous types (a `UUID`, a
-    /// `TIMESTAMPTZ`, a `NULL`) all come back as one uniform shape the
-    /// caller can print without knowing the schema ahead of time.
-    pub async fn dump_links(&self) -> Result<TableDump, sqlx::Error> {
-        let columns: Vec<(String,)> = sqlx::query_as(
-            "SELECT column_name FROM information_schema.columns \
-             WHERE table_schema = 'public' AND table_name = 'links' \
-             ORDER BY ordinal_position",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let columns: Vec<String> = columns.into_iter().map(|(c,)| c).collect();
-
-        let select_list = columns
-            .iter()
-            .map(|c| format!("{c}::text"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!("SELECT {select_list} FROM links ORDER BY code");
-
-        // `query` is built from `information_schema` column names, never
-        // from caller input, so this dynamic string can't carry an
-        // injection — hence the explicit `AssertSqlSafe` opt-in.
-        let pg_rows = sqlx::query(sqlx::AssertSqlSafe(query))
+    /// Every link, for the `/stats` endpoint. Postgres only: it doesn't reflect
+    /// what's currently cached.
+    pub async fn dump_links(&self) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as("SELECT code, long_url FROM links ORDER BY code")
             .fetch_all(&self.pool)
-            .await?;
-        let rows = pg_rows
-            .iter()
-            .map(|row| {
-                (0..columns.len())
-                    .map(|i| row.get::<Option<String>, _>(i))
-                    .collect()
-            })
-            .collect();
-
-        Ok(TableDump { columns, rows })
+            .await
     }
 }
 

@@ -15,7 +15,7 @@ requests miss the same code, they're all running on the same instance's
 Redis's lease.
 
 `resolve_miss_coalesced` fixes that with a `tokio::sync::OnceCell` per
-in-flight code (`inflight: Arc<Mutex<HashMap<String, Arc<OnceCell<...>>>>>`):
+in-flight code (`inflight: Mutex<HashMap<String, Arc<OnceCell<...>>>>`):
 the first caller for a code creates the cell and starts `resolve_miss`
 (Tier 4.3's lease loop, unchanged); every other concurrent caller for that
 *same* code finds the cell already there and just awaits its result

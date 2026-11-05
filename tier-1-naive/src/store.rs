@@ -49,6 +49,9 @@ use crate::base62;
 /// *separate* concern from what it stores, so we keep `Store` plain and let
 /// `main.rs` wrap it in `Mutex<Store>`. This is a deliberate Rust idiom: types
 /// stay single-threaded and callers add synchronisation where they need it.
+///
+/// `Default` gives an empty map and `next_id` 0, so the first code is `"0"`.
+#[derive(Default)]
 pub struct Store {
     /// code -> long URL. The hash map described above.
     urls: HashMap<String, String>,
@@ -64,14 +67,6 @@ pub struct Store {
 }
 
 impl Store {
-    /// Create an empty store whose first issued code will be `"0"`.
-    pub fn new() -> Self {
-        Self {
-            urls: HashMap::new(),
-            next_id: 0,
-        }
-    }
-
     /// Store a long URL and return the freshly minted short code.
     pub fn shorten(&mut self, url: String) -> String {
         let code = base62::encode(self.next_id);
@@ -89,22 +84,6 @@ impl Store {
     pub fn len(&self) -> usize {
         self.urls.len()
     }
-
-    /// Clippy insists that any type with `len` also has `is_empty`, and it is
-    /// right: it is what callers reach for first.
-    #[allow(dead_code)] // used by tests / later tiers, not by main.rs
-    pub fn is_empty(&self) -> bool {
-        self.urls.is_empty()
-    }
-}
-
-/// `Default` is the conventional companion to a no-argument `new()`. Deriving
-/// it is not possible here (we want `next_id` to start at 0 *and* to document
-/// that choice in one place), so we delegate.
-impl Default for Store {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[cfg(test)]
@@ -113,7 +92,7 @@ mod tests {
 
     #[test]
     fn issues_sequential_codes() {
-        let mut store = Store::new();
+        let mut store = Store::default();
         assert_eq!(store.shorten("https://a.example".into()), "0");
         assert_eq!(store.shorten("https://b.example".into()), "1");
         assert_eq!(store.shorten("https://c.example".into()), "2");
@@ -121,7 +100,7 @@ mod tests {
 
     #[test]
     fn resolves_what_it_stored() {
-        let mut store = Store::new();
+        let mut store = Store::default();
         let code = store.shorten("https://example.com/long/path".into());
         assert_eq!(
             store.resolve(&code),
@@ -131,7 +110,7 @@ mod tests {
 
     #[test]
     fn unknown_code_resolves_to_none() {
-        let store = Store::new();
+        let store = Store::default();
         assert_eq!(store.resolve("nope"), None);
     }
 
@@ -139,7 +118,7 @@ mod tests {
     /// design decision, not an accident — see Tier 0, discussion question 1.
     #[test]
     fn duplicate_urls_get_distinct_codes() {
-        let mut store = Store::new();
+        let mut store = Store::default();
         let a = store.shorten("https://same.example".into());
         let b = store.shorten("https://same.example".into());
         assert_ne!(a, b);
@@ -150,7 +129,7 @@ mod tests {
     /// codes, zero collisions — and this would hold for ten billion.
     #[test]
     fn codes_never_collide() {
-        let mut store = Store::new();
+        let mut store = Store::default();
         for i in 0..10_000 {
             store.shorten(format!("https://example.com/{i}"));
         }

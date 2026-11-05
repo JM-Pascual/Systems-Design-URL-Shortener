@@ -80,55 +80,23 @@ async fn redirect(
     }
 }
 
-/// `GET /stats` — a literal `SELECT * FROM links`, rendered as an ASCII
-/// table. Meant for watching the table fill up during a demo, not as an API
-/// a real client would parse.
+/// `GET /stats` — every link, one per line. For watching the table fill up
+/// during a demo, not an API a client would parse.
 async fn stats(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
-    let dump = state
+    let links = state
         .store
         .dump_links()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(render_ascii_table(&dump.columns, &dump.rows))
-}
-
-/// Renders a column list and row values (already all `text`, `None` for SQL
-/// `NULL`) as a `psql`-style bordered table.
-fn render_ascii_table(columns: &[String], rows: &[Vec<Option<String>>]) -> String {
-    let cell = |v: &Option<String>| v.clone().unwrap_or_else(|| "NULL".to_string());
-
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
-    for row in rows {
-        for (i, v) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell(v).len());
-        }
-    }
-
-    let write_row = |out: &mut String, cells: &[String]| {
-        out.push('|');
-        for (i, c) in cells.iter().enumerate() {
-            out.push_str(&format!(" {:<width$} |", c, width = widths[i]));
-        }
-        out.push('\n');
-    };
-
-    let mut out = String::new();
-    write_row(&mut out, columns);
-
-    out.push('+');
-    for w in &widths {
-        out.push_str(&"-".repeat(w + 2));
-        out.push('+');
-    }
-    out.push('\n');
-
-    for row in rows {
-        let cells: Vec<String> = row.iter().map(cell).collect();
-        write_row(&mut out, &cells);
-    }
-
-    out.push_str(&format!("({} row{})\n", rows.len(), if rows.len() == 1 { "" } else { "s" }));
-    out
+    Ok(links
+        .iter()
+        .map(|(code, url)| {
+            format!(
+                "{code}  {url}
+"
+            )
+        })
+        .collect())
 }
 
 #[tokio::main]
@@ -156,7 +124,7 @@ async fn main() {
     println!();
     println!("  curl -X POST localhost:3000/shorten -H 'content-type: application/json' \\");
     println!("       -d '{{\"url\":\"https://example.com\"}}'");
-    println!("  curl -i localhost:3000/0");
+    println!("  curl -i localhost:3000/1");
 
     axum::serve(listener, app).await.expect("server error");
 }

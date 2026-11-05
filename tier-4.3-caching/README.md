@@ -91,7 +91,7 @@ is what bounds that.
 
 ### The lease's release isn't fenced
 
-The success path's `redis.del(&lease_key)` deletes whatever is currently at
+The success path's `redis.del(lease_key(code))` deletes whatever is currently at
 that key — it never checks that it's still *this* worker's lease. If a
 leader finishes unusually late, after its own lease already expired and a
 second worker re-acquired it, that late `DEL` deletes the second worker's

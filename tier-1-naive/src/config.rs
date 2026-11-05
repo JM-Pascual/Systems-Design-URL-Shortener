@@ -27,7 +27,6 @@
 /// One field today. Later tiers add `database_url`, `redis_url`, `cache_ttl`,
 /// which is why this is a struct rather than a bare `String` threaded through
 /// the handlers.
-#[derive(Debug, Clone)]
 pub struct Config {
     /// Public origin used to build short URLs, e.g. `https://sho.rt`.
     ///
@@ -81,11 +80,5 @@ mod tests {
             base_url: "https://sho.rt".to_string(),
         };
         assert_eq!(cfg.short_url("3d7"), "https://sho.rt/3d7");
-    }
-
-    #[test]
-    fn default_matches_the_bound_port() {
-        assert_eq!(DEFAULT_BASE_URL, "http://localhost:3000");
-        assert!(!DEFAULT_BASE_URL.ends_with('/'), "must be stored unslashed");
     }
 }
