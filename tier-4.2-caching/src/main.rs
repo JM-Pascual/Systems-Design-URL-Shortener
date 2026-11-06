@@ -6,6 +6,7 @@
 //! ```
 
 mod base62;
+mod bloom;
 mod config;
 mod store;
 
@@ -107,9 +108,10 @@ async fn stats(State(state): State<Arc<AppState>>) -> Result<String, StatusCode>
 async fn main() {
     let config = Config::from_env();
 
-    let store = Store::connect(&config.database_url, &config.redis_url)
+    let store = Store::connect(&config)
         .await
         .expect("failed to connect to Postgres/Redis");
+    tokio::spawn(store.bloom.clone().run());
 
     let state = Arc::new(AppState { store, config });
 

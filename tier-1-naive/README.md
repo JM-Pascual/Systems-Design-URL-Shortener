@@ -4,6 +4,8 @@
 thing that satisfies Tier 0's two core requirements. Every later tier exists
 because of something that is broken here.
 
+![Tier 1 components](../docs/diagrams/tier-1-naive.svg)
+
 ---
 
 ## What it is

@@ -1,0 +1,29 @@
+# Sequence: cache-aside reads, and writes that go through to the cache.
+...@_style
+...@_icons
+
+title: Tier 4.1 - Redis in front of Postgres {class: title}
+
+flow: "" {
+  shape: sequence_diagram
+  client: Client {class: svc}
+  app: App process {class: [svc; rust]}
+  redis: Redis cache {class: [svc; redis; critical]}
+  postgres: Postgres links {class: [svc; postgres]}
+
+  redirect: "GET /{code}" {
+    client -> app: follows code
+    app -> redis: GET {class: critical-path}
+    redis -> app: "URL, or a miss"
+    app -> postgres: SELECT on a miss
+    app -> redis: SET with TTL
+    app -> client: 307 redirect
+  }
+
+  create: "POST /shorten" {
+    client -> app: long URL
+    app -> postgres: "1. INSERT"
+    app -> redis: "2. SET with TTL"
+    app -> client: 201 with code
+  }
+}

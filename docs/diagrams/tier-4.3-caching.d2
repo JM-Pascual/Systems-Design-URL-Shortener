@@ -1,0 +1,34 @@
+# Sequence: writes invalidate the cache, and one lease serializes every cache write.
+...@_style
+...@_icons
+
+title: Tier 4.3 - Invalidation and a lease {class: title}
+
+flow: "" {
+  shape: sequence_diagram
+  client: Client {class: svc}
+  app: App process {class: [svc; rust]}
+  redis: "Redis, volatile-lfu" {class: [svc; redis]}
+  postgres: Postgres links {class: [svc; postgres]}
+
+  miss: "GET /{code}, cache miss" {
+    client -> app: follows code
+    app -> redis: GET value
+    app -> redis: checks Bloom filter
+    app -> redis: "SET lease NX" {class: critical-path}
+    redis -> app: "lost: wait 50 ms, retry"
+    app -> postgres: "won: SELECT"
+    app -> redis: SET value
+    app -> redis: DEL lease
+    app -> client: 307 redirect
+  }
+
+  write: "PATCH or DELETE /{code}" {
+    client -> app: changes link
+    app -> redis: "waits for lease" {class: critical-path}
+    app -> postgres: UPDATE or DELETE
+    app -> redis: DEL value
+    app -> redis: DEL lease
+    app -> client: 204 No Content
+  }
+}

@@ -4,6 +4,8 @@
 `Ctrl-C` the server and every short link ever created is gone. This tier moves
 the mapping into Postgres so a restart stops being a data-loss event.
 
+![Tier 3 components](../docs/diagrams/tier-3-persistence.svg)
+
 ---
 
 ## Schema

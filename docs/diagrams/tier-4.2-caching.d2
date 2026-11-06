@@ -1,0 +1,47 @@
+# Sequence: the filter on the request path, and the job that keeps it complete.
+...@_style
+...@_icons
+
+title: Tier 4.2 - A filter that is safe to trust {class: title}
+
+flow: "" {
+  shape: sequence_diagram
+  client: Client {class: svc}
+  app: App process {class: [svc; rust]}
+  job: Bloom job {class: [svc; critical]}
+  redis: Redis {class: [svc; redis]}
+  postgres: Postgres {class: [svc; postgres]}
+  minio: MinIO bucket {class: svc}
+
+  shorten: "POST /shorten" {
+    client -> app: long URL
+    app -> redis: "1. BF.INSERT"
+    app -> postgres: "2. INSERT"
+    app -> redis: "3. SET value"
+  }
+
+  resolve: "GET /{code}" {
+    client -> app: follows code
+    app -> redis: GET value
+    app -> redis: "on miss: flag and BF.EXISTS" {class: critical-path}
+    redis -> app: "ready, code absent: 404"
+    app -> postgres: "otherwise: SELECT"
+  }
+
+  healthy: "Every minute, flag set" {
+    job -> postgres: reads recent codes {class: async}
+    job -> redis: adds codes {class: async}
+    job -> minio: "daily: uploads chunks" {class: async}
+    job -> postgres: "daily: records snapshot" {class: async}
+  }
+
+  recover: "Every minute, flag missing" {
+    job -> postgres: finds current snapshot {class: async}
+    job -> minio: downloads chunks {class: async}
+    job -> redis: loads and renames filter {class: async}
+    job -> postgres: reads newer codes {class: async}
+    job -> postgres: "no snapshot: scans all" {class: async}
+    job -> redis: adds codes {class: async}
+    job -> redis: sets bloom:ready {class: [async; critical-path]}
+  }
+}

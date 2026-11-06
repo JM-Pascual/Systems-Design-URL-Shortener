@@ -6,6 +6,8 @@ lookup that has to hit disk. Every redirect — Tier 0's ~99% of traffic — now
 pays that cost. This tier puts Redis in front of Postgres so most redirects
 never touch the database at all.
 
+![Tier 4.1 request flow](../docs/diagrams/tier-4.1-caching.svg)
+
 ---
 
 ## Cache-aside, concretely

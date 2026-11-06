@@ -1,0 +1,31 @@
+# Data flow: the two code-generation schemes this design tier compares.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 2 - Two ways to mint a code {class: title}
+
+url: Long URL {class: actor}
+
+path-a: Path A, carried forward {
+  class: boundary
+  counter: Shared counter {class: svc}
+  permute: Permutation (optional) {class: svc}
+  encode: base62 encode {class: svc}
+  code: Unique code {class: [svc; critical]}
+  counter -> permute: next value
+  permute -> encode: scrambled value
+  encode -> code: always unique
+}
+
+path-b: Path B, compared {
+  class: boundary
+  hash: Truncated hash {class: svc}
+  check: Code already taken? {class: svc}
+  code: Unique code {class: svc}
+  hash -> check: candidate code
+  check -> code: "free, else salt and retry"
+}
+
+url -> path-a.counter: ignores content
+url -> path-b.hash: hashes content

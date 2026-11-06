@@ -1,0 +1,15 @@
+# Context: who uses the shortener, and the load each operation runs under.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 0 - The system to design {class: title}
+
+creator: Link creator {class: actor}
+visitor: Link visitor {class: actor}
+shortener: URL shortener {class: [svc; critical]}
+destination: Destination site {class: external}
+
+creator -> shortener: "shortens, ~40/s"
+visitor -> shortener: "follows, ~4,000/s" {class: critical-path}
+shortener -> destination: "redirects, under 10 ms"

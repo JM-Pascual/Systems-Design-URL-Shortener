@@ -10,6 +10,8 @@ use sqlx::query::Query;
 use sqlx::{PgPool, Postgres};
 
 use crate::base62;
+use crate::bloom::Bloom;
+use crate::config::Config;
 
 /// How long a cached mapping lives. Arbitrary for a teaching build; a real
 /// deployment would tune it against how often links change.
@@ -20,17 +22,6 @@ const LEASE_TTL_SECONDS: u64 = 5;
 
 /// How long a request waits before trying for the lease again.
 const LEASE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-
-/// The RedisBloom key holding every code that's ever been minted.
-const CODES_BLOOM_KEY: &str = "codes_bloom";
-
-/// Target false-positive rate and initial capacity for `BF.RESERVE`.
-/// RedisBloom grows the filter automatically past this capacity.
-const BLOOM_ERROR_RATE: f64 = 0.01;
-const BLOOM_CAPACITY: i64 = 1_000_000;
-
-/// How many codes go into one `BF.MADD` during the startup backfill.
-const BLOOM_BACKFILL_CHUNK: usize = 1_000;
 
 fn lease_key(code: &str) -> String {
     format!("lease:{code}")
@@ -47,43 +38,20 @@ pub struct Store {
     /// concurrent requests to land inside the miss window, so
     /// `../thundering-herd-demo/` simulates a slow one.
     demo_query_delay: Duration,
+    pub bloom: Bloom,
 }
 
 impl Store {
-    /// Connect to Postgres (running pending migrations) and Redis, and make
-    /// sure the Bloom filter exists and holds every code Postgres has. Without
-    /// the backfill, a wiped Redis would turn every existing link into a 404.
-    pub async fn connect(database_url: &str, redis_url: &str) -> anyhow::Result<Self> {
-        let pool = PgPool::connect(database_url).await?;
+    /// Connect to Postgres (running pending migrations) and Redis. The Bloom
+    /// filter fills in the background: until it's ready, `resolve` skips it.
+    pub async fn connect(config: &Config) -> anyhow::Result<Self> {
+        let pool = PgPool::connect(&config.database_url).await?;
         sqlx::migrate!().run(&pool).await?;
 
-        let mut redis = redis::Client::open(redis_url)?
+        let redis = redis::Client::open(config.redis_url.as_str())?
             .get_multiplexed_async_connection()
             .await?;
-
-        // `BF.RESERVE` errors if the filter survives from a previous run,
-        // which is expected on every start but the first.
-        if let Err(e) = redis::cmd("BF.RESERVE")
-            .arg(CODES_BLOOM_KEY)
-            .arg(BLOOM_ERROR_RATE)
-            .arg(BLOOM_CAPACITY)
-            .query_async::<()>(&mut redis)
-            .await
-            && !e.to_string().contains("item exists")
-        {
-            return Err(e.into());
-        }
-
-        let codes: Vec<String> = sqlx::query_scalar("SELECT code FROM links")
-            .fetch_all(&pool)
-            .await?;
-        for chunk in codes.chunks(BLOOM_BACKFILL_CHUNK) {
-            redis::cmd("BF.MADD")
-                .arg(CODES_BLOOM_KEY)
-                .arg(chunk)
-                .query_async::<()>(&mut redis)
-                .await?;
-        }
+        let bloom = Bloom::new(pool.clone(), redis.clone(), config)?;
 
         let demo_query_delay_ms = std::env::var("DEMO_QUERY_DELAY_MS")
             .ok()
@@ -95,21 +63,12 @@ impl Store {
             redis,
             postgres_queries: AtomicU64::new(0),
             demo_query_delay: Duration::from_millis(demo_query_delay_ms),
+            bloom,
         })
     }
 
     pub fn postgres_query_count(&self) -> u64 {
         self.postgres_queries.load(Ordering::Relaxed)
-    }
-
-    /// `false` means the code was *never* minted, so Postgres can be skipped.
-    /// `true` means "probably", and still needs the real check.
-    async fn bloom_might_exist(&self, code: &str) -> anyhow::Result<bool> {
-        Ok(redis::cmd("BF.EXISTS")
-            .arg(CODES_BLOOM_KEY)
-            .arg(code)
-            .query_async(&mut self.redis.clone())
-            .await?)
     }
 
     /// Store a long URL and return the freshly minted short code.
@@ -125,11 +84,7 @@ impl Store {
         let code = base62::encode(id as u64);
         let mut redis = self.redis.clone();
 
-        redis::cmd("BF.ADD")
-            .arg(CODES_BLOOM_KEY)
-            .arg(&code)
-            .query_async::<()>(&mut redis)
-            .await?;
+        self.bloom.add(&code).await?;
 
         sqlx::query("INSERT INTO links (code, long_url) VALUES ($1, $2)")
             .bind(&code)
@@ -201,12 +156,16 @@ impl Store {
     /// Look up the long URL for a code: Redis first, then the Bloom filter,
     /// then the lease-guarded rebuild.
     pub async fn resolve(&self, code: &str) -> anyhow::Result<Option<String>> {
+        if !base62::is_valid(code) {
+            return Ok(None);
+        }
+
         let mut redis = self.redis.clone();
         if let Some(url) = redis.get::<_, Option<String>>(code).await? {
             return Ok(Some(url));
         }
 
-        if !self.bloom_might_exist(code).await? {
+        if !self.bloom.might_exist(code).await? {
             return Ok(None);
         }
 
@@ -272,18 +231,13 @@ impl Store {
 mod tests {
     use super::*;
 
-    /// These tests need real Postgres and Redis reachable at `DATABASE_URL`
-    /// / `REDIS_URL` (see `../docker-compose.yml`) and are marked `#[ignore]`
-    /// so `cargo test` stays usable without either. Run them explicitly:
-    /// `cargo test -p tier-4-3-caching -- --ignored`
+    /// These tests need the services in `../docker-compose.yml` and are marked
+    /// `#[ignore]` so `cargo test` stays usable without them. Run them with:
+    /// `cargo test -p tier-4-3-caching -- --ignored --test-threads=1`
     async fn test_store() -> Store {
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://shortener:shortener@localhost:5436/shortener".into());
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6382".into());
-        Store::connect(&database_url, &redis_url)
+        Store::connect(&Config::from_env())
             .await
-            .expect("connect to test database/redis")
+            .expect("connect to test services")
     }
 
     async fn test_redis() -> redis::aio::MultiplexedConnection {
@@ -343,28 +297,13 @@ mod tests {
         assert_eq!(store.postgres_query_count(), 0);
     }
 
-    /// A Redis wipe must not turn existing links into 404s: a fresh `connect`
-    /// backfills the Bloom filter from Postgres.
+    /// Keys that aren't codes mustn't be read back as if they were.
     #[tokio::test]
     #[ignore]
-    async fn bloom_filter_survives_a_redis_flush() {
+    async fn redis_keys_are_not_resolvable() {
         let store = test_store().await;
-        let code = store
-            .shorten("https://survives.example".into())
-            .await
-            .unwrap();
-
-        let mut redis = test_redis().await;
-        let _: () = redis::cmd("FLUSHALL")
-            .query_async(&mut redis)
-            .await
-            .unwrap();
-
-        let reconnected = test_store().await;
-        assert_eq!(
-            reconnected.resolve(&code).await.unwrap(),
-            Some("https://survives.example".to_string())
-        );
+        assert_eq!(store.resolve("codes_bloom").await.unwrap(), None);
+        assert_eq!(store.resolve("bloom:ready").await.unwrap(), None);
     }
 
     /// `update` must wait for the miss path's lease rather than racing it. A
