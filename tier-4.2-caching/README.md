@@ -80,10 +80,10 @@ the same way a Raft node restores a snapshot and replays only the log after it:
 3. **Fall back:** if any chunk fails to load, discard the snapshot and scan `links`.
    Only a filter marked ready is ever snapshotted.
 
-Snapshots live in an S3 bucket, with [MinIO](https://github.com/pgsty/minio) running
-locally, because they get big: about 1.4 GB for 1.2 billion codes, which a
-database's WAL and backups shouldn't carry for data that can be rebuilt. The app
-only speaks S3, so any compatible store can replace MinIO.
+Snapshots live in a bucket because they get big: about 1.4 GB for 1.2 billion
+codes, which a database's WAL and backups shouldn't carry for data that can be
+rebuilt. The app reaches it through the S3 API, and `docker-compose.yml` provides
+one for local runs.
 
 ## Clearing deleted codes
 

@@ -1,4 +1,4 @@
-# Sequence: writes invalidate the cache, and one lease serializes every cache write.
+# Sequence: writes invalidate the cache, one lease serializes cache writes, and the Bloom job runs behind them.
 ...@_style
 ...@_icons
 
@@ -8,8 +8,10 @@ flow: "" {
   shape: sequence_diagram
   client: Client {class: svc}
   app: App process {class: [svc; rust]}
+  job: Bloom job {class: svc}
   redis: "Redis, volatile-lfu" {class: [svc; redis]}
   postgres: Postgres links {class: [svc; postgres]}
+  bucket: Bucket {class: [svc; aws-s3]}
 
   miss: "GET /{code}, cache miss" {
     client -> app: follows code
@@ -30,5 +32,11 @@ flow: "" {
     app -> redis: DEL value
     app -> redis: DEL lease
     app -> client: 204 No Content
+  }
+
+  maintain: "Every minute, from Tier 4.2" {
+    job -> postgres: reads codes {class: async}
+    job -> redis: adds to Bloom filter {class: async}
+    job -> bucket: "daily: uploads snapshot" {class: async}
   }
 }

@@ -29,7 +29,7 @@ The hard part is the load those two operations run under:
 | [2: Code generation](tier-2-collisions/) | Counter vs. truncated hash (design only) | Sequential codes can be enumerated |
 | [3: Persistence](tier-3-persistence/) | Postgres | Every redirect costs a query |
 | [4.1: Cache-aside](tier-4.1-caching/) ⭐ | Redis in front of Postgres | Codes that don't exist always reach Postgres |
-| [4.2: Bloom filter](tier-4.2-caching/) | A filter of every code, kept complete by a background job, with snapshots in S3 | Cached links can't change, and hot keys stampede |
+| [4.2: Bloom filter](tier-4.2-caching/) | A filter of every code, kept complete by a background job, with snapshots in a bucket | Cached links can't change, and hot keys stampede |
 | [4.3: Invalidation and a lease](tier-4.3-caching/) | `PATCH`/`DELETE`, LFU eviction, one rebuild at a time | Waiters still poll Redis, and hot keys still expire |
 | [4.4: Singleflight and TTLs](tier-4.4-caching/) | In-process coalescing, TTL keep-alive, TTL jitter | Open: one Redis and one Postgres are still single points of failure |
 

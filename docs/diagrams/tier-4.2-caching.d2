@@ -11,7 +11,7 @@ flow: "" {
   job: Bloom job {class: [svc; critical]}
   redis: Redis {class: [svc; redis]}
   postgres: Postgres {class: [svc; postgres]}
-  minio: MinIO bucket {class: svc}
+  bucket: Bucket {class: [svc; aws-s3]}
 
   shorten: "POST /shorten" {
     client -> app: long URL
@@ -31,13 +31,13 @@ flow: "" {
   healthy: "Every minute, flag set" {
     job -> postgres: reads recent codes {class: async}
     job -> redis: adds codes {class: async}
-    job -> minio: "daily: uploads chunks" {class: async}
+    job -> bucket: "daily: uploads chunks" {class: async}
     job -> postgres: "daily: records snapshot" {class: async}
   }
 
   recover: "Every minute, flag missing" {
     job -> postgres: finds current snapshot {class: async}
-    job -> minio: downloads chunks {class: async}
+    job -> bucket: downloads chunks {class: async}
     job -> redis: loads and renames filter {class: async}
     job -> postgres: reads newer codes {class: async}
     job -> postgres: "no snapshot: scans all" {class: async}

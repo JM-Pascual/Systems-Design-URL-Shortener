@@ -2,7 +2,8 @@
 
 A copy of [Tier 4.3](../tier-4.3-caching/) plus three more mitigations. The
 lease (Tier 4.3) was the first and simplest; these three layer on top of it
-rather than replacing it.
+rather than replacing it. It keeps Tier 4.2's Bloom filter job, including its
+snapshots in a bucket.
 
 ![Tier 4.4 request flow](../docs/diagrams/tier-4.4-caching.svg)
 

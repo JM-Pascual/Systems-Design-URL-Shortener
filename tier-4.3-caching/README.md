@@ -2,7 +2,8 @@
 
 A copy of [Tier 4.2](../tier-4.2-caching/README.md) plus three additions
 that all serve the same goal: closing the gaps between "the cache says X"
-and "the database says Y."
+and "the database says Y." It keeps Tier 4.2's Bloom filter job, including its
+snapshots in a bucket.
 
 ![Tier 4.3 request flow](../docs/diagrams/tier-4.3-caching.svg)
 

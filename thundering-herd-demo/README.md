@@ -27,7 +27,8 @@ way. Both tiers get the same delay, so the comparison stays fair.
 
 ## Running it
 
-**1. Bring up each tier's own Postgres/Redis** (separate stacks, already
+**1. Bring up each tier's own services** (Postgres and Redis, plus a
+bucket for Tier 4.3's Bloom filter snapshots; separate stacks, already
 part of each tier's folder):
 
 ```bash
