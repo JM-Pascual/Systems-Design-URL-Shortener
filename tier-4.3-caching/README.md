@@ -4,6 +4,8 @@ A copy of [Tier 4.2](../tier-4.2-caching/README.md) plus three additions
 that all serve the same goal: closing the gaps between "the cache says X"
 and "the database says Y."
 
+![Tier 4.3 request flow](../docs/diagrams/tier-4.3-caching.svg)
+
 ---
 
 ## `PATCH`/`DELETE` and cache invalidation
@@ -38,14 +40,14 @@ would have hidden the actual failure mode instead of fixing it.
 One loose end, worth naming rather than silently accepting: `DELETE` cannot
 remove a code from the Bloom filter (Tier 4.2) — standard Bloom filters have
 no removal operation. Harmless, not a bug: `resolve` still falls through to
-Postgres and correctly returns `None`; the code just permanently loses the
-filter's fast-path benefit.
+Postgres and correctly returns `None`. The code loses the filter's fast path
+until the next manual rebuild, described in Tier 4.2.
 
 ---
 
-## `allkeys-lfu` eviction
+## `volatile-lfu` eviction
 
-`docker-compose.yml` now sets `maxmemory-policy allkeys-lfu` on Redis. This
+`docker-compose.yml` now sets `maxmemory-policy volatile-lfu` on Redis. This
 is the second of the three thundering-herd triggers from the root README:
 under memory pressure, a naive eviction policy can evict a key that's still
 *hot*, not just old — collapsing to the exact same stampede as a TTL lapsing,
@@ -55,9 +57,13 @@ specifically because it's still being read, which is what makes Tier 0's
 Zipfian access pattern (a few URLs take most of the traffic) so cache-friendly
 in the first place.
 
+It's `volatile-lfu` rather than `allkeys-lfu` because the Bloom filter and
+`bloom:ready` must never be evicted. They have no TTL, while cached values and
+leases all do, so this policy can only choose among keys that are safe to lose.
+
 `maxmemory` itself is left at Redis's default (`0`, unlimited) so normal
 runs and tests never evict anything unexpectedly. To actually reproduce the
-trigger: `redis-cli CONFIG SET maxmemory 1mb` against a running instance,
+trigger: `redis-cli CONFIG SET maxmemory 5mb` against a running instance,
 then watch cold keys get evicted before hot ones under load.
 
 ---

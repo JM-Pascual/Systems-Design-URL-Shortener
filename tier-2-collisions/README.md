@@ -5,6 +5,8 @@ asking *why* — or whether a different scheme might be better. This tier makes
 that a real design decision by comparing it against the obvious alternative:
 deriving the code from the URL's content instead of from a counter.
 
+![The two code-generation paths](../docs/diagrams/tier-2-collisions.svg)
+
 ---
 
 ## The two paths

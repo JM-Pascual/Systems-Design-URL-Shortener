@@ -1,5 +1,7 @@
 # Tier 0 — Requirements Gathering
 
+![Who uses the system and the load on each operation](../docs/diagrams/tier-0-requirements.svg)
+
 ---
 
 ## What this session is for

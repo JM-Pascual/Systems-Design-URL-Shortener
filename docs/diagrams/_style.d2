@@ -1,0 +1,78 @@
+# _style.d2 — new-diagram house style. Partial: imported by every diagram, never rendered alone.
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 0
+    pad: 60
+    theme-overrides: {
+      # default edge colours (solid and dashed)
+      B1: "#57606A"
+      B2: "#57606A"
+    }
+  }
+}
+
+classes: {
+  # ---- nodes
+  svc: {
+    style: {fill: "#FFFFFF"; stroke: "#6E7781"; border-radius: 6}
+  }
+  store: {
+    shape: cylinder
+    style: {fill: "#FFFFFF"; stroke: "#6E7781"}
+  }
+  queue: {
+    shape: queue
+    style: {fill: "#FFFFFF"; stroke: "#6E7781"}
+  }
+  actor: {
+    shape: person
+    width: 56
+    height: 72
+    style: {fill: "#FFFFFF"; stroke: "#6E7781"}
+  }
+  external: {
+    style: {fill: "#EAEEF2"; stroke: "#AFB8C1"; font-color: "#57606A"}
+  }
+  critical: {
+    style: {fill: "#DDF4FF"; stroke: "#0969DA"; bold: true}
+  }
+  inferred: {
+    style: {stroke-dash: 4; opacity: 0.6}
+  }
+  boundary: {
+    style: {fill: "#F6F8FA"; stroke: "#D0D7DE"; font-size: 18}
+  }
+  title: {
+    shape: text
+    near: top-center
+    style: {font-size: 24; bold: true}
+  }
+  legend: {
+    near: bottom-center
+    grid-rows: 1
+    grid-gap: 16
+    style: {fill: "#FFFFFF"; stroke: "#D0D7DE"; font-size: 14}
+  }
+  # legend swatches: stack after the class they illustrate, e.g. [store; legend-item]
+  legend-item: {
+    width: 120
+    height: 56
+    style.font-size: 13
+  }
+  legend-text: {
+    shape: text
+    style: {font-size: 14; font-color: "#57606A"}
+  }
+
+  # ---- edges
+  async: {
+    style.stroke-dash: 5
+  }
+  critical-path: {
+    style: {stroke: "#0969DA"; stroke-width: 3}
+  }
+  inferred-edge: {
+    style: {stroke-dash: 2; opacity: 0.6}
+  }
+}

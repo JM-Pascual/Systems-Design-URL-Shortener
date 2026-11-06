@@ -1,0 +1,24 @@
+# Components: one process holding every link in memory.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 1 - One process, all in RAM {class: title}
+
+client: Client {class: actor}
+
+app: App process {
+  class: boundary
+  handlers: Axum handlers {class: [svc; rust]}
+  base62: base62 encode {class: svc}
+  store: "Mutex<Store>" {
+    class: boundary
+    counter: next_id counter {class: svc}
+    links: "HashMap<code, url>" {class: [svc; critical]}
+  }
+}
+
+client -> app.handlers: "POST /shorten, GET /{code}"
+app.handlers -> app.store.counter: takes next id
+app.handlers -> app.base62: encodes id
+app.handlers -> app.store.links: inserts or reads

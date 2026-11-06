@@ -1,0 +1,19 @@
+# Components: the map moves to Postgres; every redirect now costs a query.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 3 - Links survive a restart {class: title}
+
+client: Client {class: actor}
+app: App process {class: [svc; rust]}
+
+postgres: Postgres {
+  class: boundary
+  sequence: link_ids sequence {class: svc}
+  links: links table {class: [store; postgres; critical]}
+}
+
+client -> app: "POST /shorten, GET /{code}"
+app -> postgres.sequence: nextval
+app -> postgres.links: "INSERT, SELECT" {class: critical-path}

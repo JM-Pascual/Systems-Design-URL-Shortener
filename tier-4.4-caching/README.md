@@ -4,6 +4,8 @@ A copy of [Tier 4.3](../tier-4.3-caching/) plus three more mitigations. The
 lease (Tier 4.3) was the first and simplest; these three layer on top of it
 rather than replacing it.
 
+![Tier 4.4 request flow](../docs/diagrams/tier-4.4-caching.svg)
+
 ---
 
 ## Singleflight: coalescing within one process
@@ -84,7 +86,7 @@ nothing:
 invalidation being explicit. If anything wrote Postgres *outside* this app
 (a manual migration, another service), a kept-alive hot key would serve
 the old value indefinitely — that's the case where a real re-fetch would
-earn its cost. And it relies on `allkeys-lfu` to bound memory, since
+earn its cost. And it relies on `volatile-lfu` to bound memory, since
 kept-alive keys don't age out on their own.
 
 ---
