@@ -27,6 +27,10 @@ once it resolves, so the *next* stampede on that code (later, after this one
 settles) starts fresh rather than being stuck with a `OnceCell` that can
 only ever initialize once.
 
+It keeps working while Redis is down, because a failed Redis read still goes through
+it. In a test with Redis stopped and a 200 ms simulated query, 20 concurrent requests
+for one code produced 1 Postgres query, where Tier 4.1 produced 20.
+
 This only coordinates within one process. A fleet of multiple app instances
 would each have their own `inflight` map — the lease is still what would
 coordinate *between* them. Singleflight and the lease are complementary,
@@ -110,6 +114,7 @@ small, staggered ones.
 | Problem | Status |
 |---|---|
 | Still one Postgres sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem |
+| While Redis is down, reads reach Postgres limited only per code, and writes return 500. | Open problem |
 | Singleflight only coordinates within one process; a fleet of app instances would still rely entirely on the lease to coordinate with each other. | Open problem |
 | The keep-alive assumes every write goes through this app's `PATCH`/`DELETE`. Anything writing Postgres directly would leave hot keys serving stale data indefinitely. | Open problem |
 

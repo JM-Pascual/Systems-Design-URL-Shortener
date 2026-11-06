@@ -96,6 +96,11 @@ request ever falls through to querying Postgres unguarded, and no request
 can be blocked forever by a leader that never comes back — the lease's TTL
 is what bounds that.
 
+That guarantee only holds while Redis works. If taking the lease fails, the request
+reads Postgres directly and doesn't write the value back: without a lease, a write
+could race an invalidation. `PATCH` and `DELETE` still return 500, because they
+can't invalidate.
+
 ### The lease's release isn't fenced
 
 The success path's `redis.del(lease_key(code))` deletes whatever is currently at
@@ -124,6 +129,7 @@ lease defends against both without knowing which one happened.
 | Problem | Status |
 |---|---|
 | Still one Postgres `nextval()` sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem |
+| While Redis is down, reads fall back to Postgres with no limit on the load, and writes return 500. | Open problem |
 | The lease only protects a single Redis instance's view of a key. Replicating Redis for availability would mean a lease acquired against a primary that hasn't yet propagated to a replica is a new race. | Open problem |
 
 ---

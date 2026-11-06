@@ -56,6 +56,12 @@ fn should_extend_ttl(remaining_ttl_secs: f64) -> bool {
     TTL_EXTEND_WINDOW_SECONDS * (-r.ln()) >= remaining_ttl_secs
 }
 
+/// shortcut: logs every failed request, so an outage is noisy. The gate tier's
+/// breaker can replace this with a single state change.
+fn log_redis_error(e: impl std::fmt::Display) {
+    eprintln!("redis failed, using Postgres: {e:#}");
+}
+
 pub struct Store {
     pool: PgPool,
     /// Cheap to clone per use: every clone shares one connection, which
@@ -199,22 +205,32 @@ impl Store {
 
         let mut redis = self.redis.clone();
 
-        let (value, ttl): (Option<String>, i64) = redis::pipe()
+        let cached: Result<(Option<String>, i64), _> = redis::pipe()
             .atomic()
             .get(code)
             .ttl(code)
             .query_async(&mut redis)
-            .await?;
+            .await;
 
-        if let Some(url) = value {
-            if ttl > 0 && should_extend_ttl(ttl as f64) {
-                redis.expire::<_, ()>(code, TTL_EXTENSION_SECONDS).await?;
+        match cached {
+            Ok((Some(url), ttl)) => {
+                if ttl > 0
+                    && should_extend_ttl(ttl as f64)
+                    && let Err(e) = redis.expire::<_, ()>(code, TTL_EXTENSION_SECONDS).await
+                {
+                    log_redis_error(e);
+                }
+                return Ok(Some(url));
             }
-            return Ok(Some(url));
+            Ok((None, _)) => {}
+            // Still coalesced, so an outage doesn't send every request to Postgres.
+            Err(_) => return self.resolve_miss_coalesced(code).await,
         }
 
-        if !self.bloom.might_exist(code).await? {
-            return Ok(None);
+        match self.bloom.might_exist(code).await {
+            Ok(false) => return Ok(None),
+            Ok(true) => {}
+            Err(_) => return self.resolve_miss_coalesced(code).await,
         }
 
         self.resolve_miss_coalesced(code).await
@@ -248,45 +264,67 @@ impl Store {
 
     /// Whoever gets the lease rebuilds; everyone else sleeps and tries again,
     /// for the lease itself and not just the key. If the holder crashes, its
-    /// lease expires and the next waiter takes over, so no request ever queries
-    /// Postgres unguarded and none is blocked forever.
+    /// lease expires and the next waiter takes over, so while Redis works no
+    /// request queries Postgres unguarded and none is blocked forever.
     async fn resolve_miss(&self, code: &str) -> anyhow::Result<Option<String>> {
         let mut redis = self.redis.clone();
 
         loop {
-            if let Some(url) = redis.get::<_, Option<String>>(code).await? {
-                return Ok(Some(url));
+            match redis.get::<_, Option<String>>(code).await {
+                Ok(Some(url)) => return Ok(Some(url)),
+                Ok(None) => {}
+                Err(e) => {
+                    log_redis_error(e);
+                    return self.read_postgres(code).await;
+                }
             }
 
-            if self.try_acquire_lease(code).await? {
-                // Released on every outcome, so a failed query doesn't stall
-                // every waiter for the full lease TTL.
-                let outcome = self.rebuild(code).await;
-                redis.del::<_, ()>(lease_key(code)).await?;
-                return outcome;
+            match self.try_acquire_lease(code).await {
+                Ok(true) => {
+                    // Released on every outcome, so a failed query doesn't stall
+                    // every waiter for the full lease TTL. If the release fails,
+                    // that TTL still ends it.
+                    let outcome = self.rebuild(code).await;
+                    if let Err(e) = redis.del::<_, ()>(lease_key(code)).await {
+                        log_redis_error(e);
+                    }
+                    return outcome;
+                }
+                Ok(false) => tokio::time::sleep(LEASE_RETRY_INTERVAL).await,
+                Err(e) => {
+                    log_redis_error(e);
+                    return self.read_postgres(code).await;
+                }
             }
-
-            tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
         }
     }
 
-    /// Query Postgres and, on a hit, populate the cache.
-    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
+    /// Read Postgres without touching the cache. Used alone when Redis has failed:
+    /// with no working lease to guard it, this path must not write a value back.
+    async fn read_postgres(&self, code: &str) -> anyhow::Result<Option<String>> {
         self.postgres_queries.fetch_add(1, Ordering::Relaxed);
         tokio::time::sleep(self.demo_query_delay).await;
 
-        let url: Option<String> = sqlx::query_scalar(
+        Ok(sqlx::query_scalar(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(code)
         .fetch_optional(&self.pool)
-        .await?;
+        .await?)
+    }
 
-        if let Some(url) = &url {
-            self.redis
+    /// Query Postgres and, on a hit, populate the cache.
+    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
+        let url = self.read_postgres(code).await?;
+
+        if let Some(url) = &url
+            && let Err(e) = self
+                .redis
                 .clone()
                 .set_ex::<_, _, ()>(code, url, jittered_ttl())
-                .await?;
+                .await
+        {
+            log_redis_error(e);
         }
 
         Ok(url)
@@ -539,5 +577,70 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(resolved.as_deref(), Some("https://back.example"));
+    }
+
+    /// A failing cache must cost speed, not availability. Covers a failed `GET`, filter check and lease.
+    #[tokio::test]
+    #[ignore]
+    async fn reads_survive_redis_failures() {
+        let store = test_store().await;
+        let code = store.shorten("https://db.example".into()).await.unwrap();
+
+        // Revoking commands from the app's user makes them fail on demand. This
+        // separate user keeps the power to delete the key and restore them.
+        let redis_url = crate::config::Config::from_env().redis_url;
+        let mut admin = redis::Client::open(redis_url)
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let _: () = redis::cmd("ACL")
+            .arg("SETUSER")
+            .arg("admin")
+            .arg("on")
+            .arg("nopass")
+            .arg("~*")
+            .arg("+@all")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("AUTH")
+            .arg("admin")
+            .arg("any")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        let acl = {
+            let admin = admin.clone();
+            move |rule: &'static str| {
+                let mut admin = admin.clone();
+                async move {
+                    let _: () = redis::cmd("ACL")
+                        .arg("SETUSER")
+                        .arg("default")
+                        .arg(rule)
+                        .query_async(&mut admin)
+                        .await
+                        .unwrap();
+                }
+            }
+        };
+
+        for (revoke, restore) in [
+            ("-@all", "+@all"),
+            ("-bf.exists", "+bf.exists"),
+            ("-set", "+set"),
+        ] {
+            let _: () = admin.del(&code).await.unwrap();
+            acl(revoke).await;
+            let resolved = store.resolve(&code).await;
+            acl(restore).await;
+            assert_eq!(
+                resolved.unwrap().as_deref(),
+                Some("https://db.example"),
+                "with {revoke}"
+            );
+        }
     }
 }

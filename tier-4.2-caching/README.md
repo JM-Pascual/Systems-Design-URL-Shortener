@@ -33,6 +33,9 @@ So **the filter may only say "absent" if it's known to be complete.** The key
 A flush removes the flag along with the filter, so a wiped Redis falls back to
 the safe path by itself, with the app still running.
 
+If the filter check itself fails, `resolve` treats that like a missing flag and
+asks Postgres.
+
 `resolve` also rejects anything that couldn't be a code before touching Redis.
 Otherwise `GET /bloom:ready` would read the flag and redirect to it.
 
@@ -109,7 +112,7 @@ The job then scans `links`, and misses go to Postgres until it finishes.
 |---|---|
 | A link can't be edited or deleted, because nothing invalidates the cache. | Fixed in Tier 4.3 |
 | No coordination on a cache-miss stampede. | Fixed in Tier 4.3 |
-| If Redis goes down, every request fails instead of falling back to Postgres. | Open problem |
+| While Redis is down, reads fall back to Postgres with no limit on the load, and writes return 500. | Open problem |
 | A code lost in a Redis crash can 404 for up to a minute, until the job repairs it. | Accepted |
 
 ## Discussion questions

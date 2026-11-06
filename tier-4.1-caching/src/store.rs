@@ -13,6 +13,12 @@ use crate::base62;
 /// deployment would tune it against how often links change.
 const CACHE_TTL_SECONDS: u64 = 300;
 
+/// shortcut: logs every failed request, so an outage is noisy. The gate tier's
+/// breaker can replace this with a single state change.
+fn log_redis_error(e: impl std::fmt::Display) {
+    eprintln!("redis failed, using Postgres: {e:#}");
+}
+
 pub struct Store {
     pool: PgPool,
     /// Cheap to clone per use: every clone shares one connection, which
@@ -84,31 +90,44 @@ impl Store {
 
     /// Look up the long URL for a code: Redis first, then Postgres on a miss.
     pub async fn resolve(&self, code: &str) -> anyhow::Result<Option<String>> {
-        let mut redis = self.redis.clone();
-        if let Some(url) = redis.get::<_, Option<String>>(code).await? {
-            return Ok(Some(url));
+        match self.redis.clone().get::<_, Option<String>>(code).await {
+            Ok(Some(url)) => return Ok(Some(url)),
+            Ok(None) => {}
+            Err(e) => {
+                log_redis_error(e);
+                return self.read_postgres(code).await;
+            }
         }
 
         self.rebuild(code).await
     }
 
-    /// Query Postgres and, on a hit, populate the cache.
-    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
+    /// Read Postgres without touching the cache. Used alone when Redis has failed:
+    /// with no working lease to guard it, this path must not write a value back.
+    async fn read_postgres(&self, code: &str) -> anyhow::Result<Option<String>> {
         self.postgres_queries.fetch_add(1, Ordering::Relaxed);
         tokio::time::sleep(self.demo_query_delay).await;
 
-        let url: Option<String> = sqlx::query_scalar(
+        Ok(sqlx::query_scalar(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(code)
         .fetch_optional(&self.pool)
-        .await?;
+        .await?)
+    }
 
-        if let Some(url) = &url {
-            self.redis
+    /// Query Postgres and, on a hit, populate the cache.
+    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
+        let url = self.read_postgres(code).await?;
+
+        if let Some(url) = &url
+            && let Err(e) = self
+                .redis
                 .clone()
                 .set_ex::<_, _, ()>(code, url, CACHE_TTL_SECONDS)
-                .await?;
+                .await
+        {
+            log_redis_error(e);
         }
 
         Ok(url)
@@ -222,5 +241,66 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(resolved.as_deref(), Some("https://back.example"));
+    }
+
+    /// A failing cache must cost speed, not availability. Covers a failed `GET` and a failed `SET`.
+    #[tokio::test]
+    #[ignore]
+    async fn reads_survive_redis_failures() {
+        let store = test_store().await;
+        let code = store.shorten("https://db.example".into()).await.unwrap();
+
+        // Revoking commands from the app's user makes them fail on demand. This
+        // separate user keeps the power to delete the key and restore them.
+        let redis_url = crate::config::Config::from_env().redis_url;
+        let mut admin = redis::Client::open(redis_url)
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let _: () = redis::cmd("ACL")
+            .arg("SETUSER")
+            .arg("admin")
+            .arg("on")
+            .arg("nopass")
+            .arg("~*")
+            .arg("+@all")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("AUTH")
+            .arg("admin")
+            .arg("any")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        let acl = {
+            let admin = admin.clone();
+            move |rule: &'static str| {
+                let mut admin = admin.clone();
+                async move {
+                    let _: () = redis::cmd("ACL")
+                        .arg("SETUSER")
+                        .arg("default")
+                        .arg(rule)
+                        .query_async(&mut admin)
+                        .await
+                        .unwrap();
+                }
+            }
+        };
+
+        for (revoke, restore) in [("-@all", "+@all"), ("-set", "+set")] {
+            let _: () = admin.del(&code).await.unwrap();
+            acl(revoke).await;
+            let resolved = store.resolve(&code).await;
+            acl(restore).await;
+            assert_eq!(
+                resolved.unwrap().as_deref(),
+                Some("https://db.example"),
+                "with {revoke}"
+            );
+        }
     }
 }

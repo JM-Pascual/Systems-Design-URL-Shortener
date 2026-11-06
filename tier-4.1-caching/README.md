@@ -46,6 +46,16 @@ value from the same immutable row; if the value being cached could ever
 differ between two writers, this same mechanism would silently let a stale
 write clobber a fresh one.
 
+### If Redis fails
+
+Postgres holds every link, so a failing cache should cost speed, not availability.
+A failed `GET` counts as a miss and the request reads Postgres. That path doesn't
+write the value back, and a failed `SET` after a normal miss is only logged. The
+connection reconnects by itself once Redis returns.
+
+Writes are different: `POST /shorten` still returns 500 while Redis is down. And
+with no limit, the full read load lands on Postgres.
+
 ### This version is deliberately vulnerable to a thundering herd
 
 There is no coordination at all yet: if a hot key's TTL lapses under
@@ -65,7 +75,7 @@ felt the failure it's fixing.
 | A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Fixed in Tier 4.2 — Bloom filter |
 | No coordination on a cache-miss stampede (thundering herd). | Fixed in Tier 4.3 — a lease |
 | Still one counter in one process. | Open problem |
-| While Redis is down, redirects return 500 instead of falling back to Postgres. The app reconnects by itself once Redis is back. | Open problem |
+| While Redis is down, reads fall back to Postgres with no limit on the load, and writes return 500. | Open problem |
 
 ---
 
