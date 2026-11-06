@@ -11,4 +11,5 @@ serde.workspace = true
 sqlx.workspace = true
 redis.workspace = true
 anyhow.workspace = true
+object_store.workspace = true
 rand.workspace = true
