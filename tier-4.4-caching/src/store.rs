@@ -58,8 +58,9 @@ fn should_extend_ttl(remaining_ttl_secs: f64) -> bool {
 
 pub struct Store {
     pool: PgPool,
-    /// Cheap to clone per use: every clone multiplexes the same connection.
-    redis: redis::aio::MultiplexedConnection,
+    /// Cheap to clone per use: every clone shares one connection, which
+    /// reconnects by itself if Redis restarts.
+    redis: redis::aio::ConnectionManager,
     /// How many times `resolve` has queried Postgres, for `/metrics`. This is
     /// the exact thing a stampede spikes.
     postgres_queries: AtomicU64,
@@ -80,7 +81,11 @@ impl Store {
         sqlx::migrate!().run(&pool).await?;
 
         let redis = redis::Client::open(config.redis_url.as_str())?
-            .get_multiplexed_async_connection()
+            .get_connection_manager_with_config(
+                // Retrying inside a request would stall it for seconds while Redis
+                // is down. Fail fast instead: the next command reconnects.
+                redis::aio::ConnectionManagerConfig::new().set_number_of_retries(1),
+            )
             .await?;
         let bloom = Bloom::new(pool.clone(), redis.clone(), config)?;
 
@@ -498,5 +503,41 @@ mod tests {
             ttl > TTL_EXTENSION_SECONDS,
             "TTL should still be near the full base value, got {ttl}"
         );
+    }
+
+    /// A dropped connection must heal by itself: restarting Redis shouldn't
+    /// mean restarting the app too. The command in flight may fail, so retry.
+    #[tokio::test]
+    #[ignore]
+    async fn recovers_after_the_connection_drops() {
+        let store = test_store().await;
+        let code = store.shorten("https://back.example".into()).await.unwrap();
+
+        let redis_url = crate::config::Config::from_env().redis_url;
+        let mut admin = redis::Client::open(redis_url)
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let killed: i64 = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("TYPE")
+            .arg("normal")
+            .arg("SKIPME")
+            .arg("yes")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert!(killed > 0);
+
+        let mut resolved = None;
+        for _ in 0..50 {
+            if let Ok(url) = store.resolve(&code).await {
+                resolved = url;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(resolved.as_deref(), Some("https://back.example"));
     }
 }

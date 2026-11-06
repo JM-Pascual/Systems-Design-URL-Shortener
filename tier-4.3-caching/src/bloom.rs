@@ -41,7 +41,7 @@ const SNAPSHOT_PREFIX: &str = "bloom";
 #[derive(Clone)]
 pub struct Bloom {
     pool: PgPool,
-    redis: redis::aio::MultiplexedConnection,
+    redis: redis::aio::ConnectionManager,
     snapshots: AmazonS3,
     capacity: i64,
 }
@@ -49,7 +49,7 @@ pub struct Bloom {
 impl Bloom {
     pub fn new(
         pool: PgPool,
-        redis: redis::aio::MultiplexedConnection,
+        redis: redis::aio::ConnectionManager,
         config: &Config,
     ) -> anyhow::Result<Self> {
         // Building the client doesn't connect, so the app starts without the

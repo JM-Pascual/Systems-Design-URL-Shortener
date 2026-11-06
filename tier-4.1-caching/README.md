@@ -65,6 +65,7 @@ felt the failure it's fixing.
 | A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Fixed in Tier 4.2 — Bloom filter |
 | No coordination on a cache-miss stampede (thundering herd). | Fixed in Tier 4.3 — a lease |
 | Still one counter in one process. | Open problem |
+| While Redis is down, redirects return 500 instead of falling back to Postgres. The app reconnects by itself once Redis is back. | Open problem |
 
 ---
 

@@ -24,7 +24,7 @@ use config::Config;
 use store::Store;
 
 /// Shared application state. No `Mutex` here — `Store` wraps a `PgPool` and
-/// a `MultiplexedConnection`, both already safe to share across requests.
+/// a `ConnectionManager`, both already safe to share across requests.
 struct AppState {
     store: Store,
     config: Config,
