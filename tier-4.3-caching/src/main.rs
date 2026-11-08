@@ -36,15 +36,15 @@ struct ShortenRequest {
     url: String,
 }
 
+#[derive(Deserialize)]
+struct PatchRequest {
+    url: String,
+}
+
 #[derive(Serialize)]
 struct ShortenResponse {
     code: String,
     short_url: String,
-}
-
-#[derive(Deserialize)]
-struct PatchRequest {
-    url: String,
 }
 
 /// `POST /shorten` — create a short code for a URL.

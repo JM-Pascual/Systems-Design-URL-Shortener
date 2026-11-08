@@ -22,22 +22,17 @@ services:
       retries: 15
 
   redis:
-    # `redis-stack-server`, not plain `redis`, from Tier 4.2 on: the
-    # existence-check Bloom filter needs the RedisBloom module (BF.* commands),
-    # which vanilla Redis doesn't ship.
-    image: redis/redis-stack-server:7.4.0-v3
+    # The Bloom filter's `BF.*` commands ship with Redis since version 8, and
+    # `SET ... IFEQ` and `DELEX` since 8.4.
+    image: redis:8.4
     restart: unless-stopped
-    environment:
-      # volatile-lfu: once memory pressure forces an eviction, evict the
-      # least-*frequently*-used key among those with a TTL -- the defense
-      # against the "eviction under memory pressure" thundering-herd trigger
-      # (see the README). Cached values and leases all have a TTL; the Bloom
-      # filter and `bloom:ready` don't, so they're never evicted. `maxmemory`
-      # is left at its default (0, unlimited) so normal runs never evict
-      # anything; `redis-cli CONFIG SET maxmemory 5mb` reproduces the trigger.
-      # appendonly: the Bloom filter lives in Redis, and rebuilding it after a
-      # plain restart would be wasted work.
-      REDIS_ARGS: "--maxmemory-policy volatile-lfu --appendonly yes"
+    # appendonly: the Bloom filter lives in Redis, and rebuilding it after a plain
+    # restart would be wasted work.
+    # maxmemory: unlimited by default, so without it Redis never evicts. 8 MB is
+    # small on purpose, to make eviction easy to watch.
+    # volatile-lfu: evict only keys with a TTL, least used first. Cached URLs and
+    # notes have one; the filter and `bloom:ready` don't, so they stay.
+    command: redis-server --appendonly yes --maxmemory 8mb --maxmemory-policy volatile-lfu
     ports:
       - "6382:6379"
     volumes:

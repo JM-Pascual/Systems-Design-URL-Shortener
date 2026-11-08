@@ -28,10 +28,9 @@ The hard part is the load those two operations run under:
 | [1: Naive](tier-1-naive/) | `HashMap` and a counter in one process | Restarts lose everything |
 | [2: Code generation](tier-2-collisions/) | Counter vs. truncated hash (design only) | Sequential codes can be enumerated |
 | [3: Persistence](tier-3-persistence/) | Postgres | Every redirect costs a query |
-| [4.1: Cache-aside](tier-4.1-caching/) ⭐ | Redis in front of Postgres | Codes that don't exist always reach Postgres |
-| [4.2: Bloom filter](tier-4.2-caching/) | A filter of every code, kept complete by a background job, with snapshots in a bucket | Cached links can't change, and hot keys stampede |
-| [4.3: Invalidation and a lease](tier-4.3-caching/) | `PATCH`/`DELETE`, LFU eviction, one rebuild at a time | Waiters still poll Redis, and hot keys still expire |
-| [4.4: Singleflight and TTLs](tier-4.4-caching/) | In-process coalescing, TTL keep-alive, TTL jitter | Open: one Redis and one Postgres are still single points of failure |
+| [4.1: Cache-aside](tier-4.1-caching/) ⭐ | Redis in front of Postgres, a 5-minute TTL, and `DEL` on writes | Stampedes and stale values, on purpose, plus a query for every unknown code |
+| [4.2: Bloom filter](tier-4.2-caching/) | A filter of every code, kept complete by a background job, with snapshots in a bucket | The races from 4.1 are still open |
+| [4.3: A note in the key](tier-4.3-caching/) | One rebuilder per key with `SET NX` and `SET IFEQ`, TTL jitter, and `volatile-lfu` eviction | A lost `DEL` leaves an old URL cached for up to one TTL |
 
 The [thundering herd demo](thundering-herd-demo/) compares 4.1 and 4.3 live in
 Grafana. [QUESTIONS.md](QUESTIONS.md) collects open discussion questions.

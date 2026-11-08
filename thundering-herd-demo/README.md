@@ -1,14 +1,14 @@
 # Thundering Herd Demo
 
 A live, navigable dashboard comparing [Tier 4.1](../tier-4.1-caching/) (no
-coordination on a cache miss) against [Tier 4.3](../tier-4.3-caching/) (the
-lease) under an identical simulated stampede — Prometheus scraping both
+coordination on a cache miss) against [Tier 4.3](../tier-4.3-caching/) (a
+note in the key) under an identical simulated stampede — Prometheus scraping both
 apps' `/metrics`, rendered in a Grafana dashboard that's pre-provisioned, not
 something you build by clicking around.
 
 Result from an actual run: a burst of 50 concurrent requests against a cold
 key produced **150 Postgres queries on Tier 4.1** (one per request) and
-**3 on Tier 4.3** (one per burst — the lease held) over three bursts. That's
+**3 on Tier 4.3** (one per burst — the note held) over three bursts. That's
 the number to point at; the graph just makes it visible over time.
 
 ---
@@ -21,9 +21,10 @@ warm Postgres, a real query returns in well under a millisecond — too fast
 for any concurrency tool to reliably land many requests inside that window,
 which makes the failure nearly impossible to reproduce honestly on a laptop.
 `DEMO_QUERY_DELAY_MS` (read by both tiers' `Store`, off by default) inserts
-a real `tokio::time::sleep` before the Postgres query on a miss, simulating
+a real `tokio::time::sleep` after the Postgres query on a miss, simulating
 a realistically slow backend rather than faking the comparison some other
-way. Both tiers get the same delay, so the comparison stays fair.
+way. Both tiers get the same delay, so the comparison stays fair. Keep it
+under 200 ms: past that, Tier 4.3's waiters stop waiting and query Postgres.
 
 ## Running it
 
@@ -42,12 +43,12 @@ docker compose -f ../tier-4.3-caching/docker-compose.yml up -d
 # from the repo root
 DATABASE_URL=postgres://shortener:shortener@localhost:5434/shortener \
 REDIS_URL=redis://localhost:6380 \
-PORT=3000 DEMO_QUERY_DELAY_MS=1000 \
+PORT=3000 DEMO_QUERY_DELAY_MS=150 \
 cargo run -p tier-4-1-caching &
 
 DATABASE_URL=postgres://shortener:shortener@localhost:5436/shortener \
 REDIS_URL=redis://localhost:6382 \
-PORT=3002 DEMO_QUERY_DELAY_MS=1000 \
+PORT=3002 DEMO_QUERY_DELAY_MS=150 \
 cargo run -p tier-4-3-caching &
 ```
 

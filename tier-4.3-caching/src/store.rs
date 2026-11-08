@@ -1,36 +1,44 @@
-//! Tier 4.2's store plus `PATCH`/`DELETE` invalidation, and a lease that
-//! serializes every write to a code's cache entry. See this tier's README.
+//! The cache-aside store: Redis in front of Tier 3's Postgres `links` table. A
+//! miss leaves a note in the key, so one reader rebuilds it and a write's `DEL`
+//! cancels that rebuild. See this tier's README.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use rand::Rng;
 use redis::AsyncCommands;
-use sqlx::postgres::PgArguments;
-use sqlx::query::Query;
-use sqlx::{PgPool, Postgres};
+use sqlx::PgPool;
 
 use crate::base62;
 use crate::bloom::Bloom;
 use crate::config::Config;
 
-/// How long a cached mapping lives. Arbitrary for a teaching build; a real
-/// deployment would tune it against how often links change.
+/// How long a cached mapping lives, which is also the longest a wrong value can
+/// survive. Shorter means less staleness and more Postgres queries. 5 minutes is
+/// the value AWS uses in its lazy-loading example. Every tier uses the same one.
 const CACHE_TTL_SECONDS: u64 = 300;
+/// Spreads out expiries, so keys cached together don't all miss together.
+const CACHE_TTL_JITTER_SECONDS: u64 = 10;
 
-/// Upper bound on how long a crashed lease holder can block everyone else.
-const LEASE_TTL_SECONDS: u64 = 5;
+/// A note marks a key someone is rebuilding. Postgres `TEXT` can't hold a NUL
+/// byte, so no URL starts with one.
+const NOTE_PREFIX: char = '\0';
+/// Long enough for one `SELECT`. A rebuilder that crashes frees the key after this.
+const NOTE_TTL_MS: u64 = 2_000;
+/// How often a reader that found a note checks again, and when it stops waiting.
+const WAIT_STEP: Duration = Duration::from_millis(50);
+const WAIT_LIMIT: Duration = Duration::from_millis(200);
 
-/// How long a request waits before trying for the lease again.
-const LEASE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-
-fn lease_key(code: &str) -> String {
-    format!("lease:{code}")
+fn jittered_ttl() -> u64 {
+    CACHE_TTL_SECONDS + rand::thread_rng().gen_range(0..=CACHE_TTL_JITTER_SECONDS)
 }
 
-/// shortcut: logs every failed request, so an outage is noisy. The gate tier's
-/// breaker can replace this with a single state change.
+fn new_note() -> String {
+    format!("{NOTE_PREFIX}{:x}", rand::random::<u64>())
+}
+
 fn log_redis_error(e: impl std::fmt::Display) {
-    eprintln!("redis failed, using Postgres: {e:#}");
+    eprintln!("redis failed: {e:#}");
 }
 
 pub struct Store {
@@ -41,9 +49,9 @@ pub struct Store {
     /// How many times `resolve` has queried Postgres, for `/metrics`. This is
     /// the exact thing a stampede spikes.
     postgres_queries: AtomicU64,
-    /// From `DEMO_QUERY_DELAY_MS`: a real local query is too fast for a demo's
-    /// concurrent requests to land inside the miss window, so
-    /// `../thundering-herd-demo/` simulates a slow one.
+    /// From `DEMO_QUERY_DELAY_MS`: a real local read is too fast for concurrent
+    /// requests to land between its `SELECT` and `SET`, so this widens that gap
+    /// for `../thundering-herd-demo/` and the stale-set test.
     demo_query_delay: Duration,
     pub bloom: Bloom,
 }
@@ -84,16 +92,13 @@ impl Store {
 
     /// Store a long URL and return the freshly minted short code.
     ///
-    /// The two Redis writes sit on opposite sides of the `INSERT` on purpose:
-    /// a code in the filter whose `INSERT` fails is a harmless false positive,
-    /// while a cached value whose `INSERT` fails would resolve a link Postgres
-    /// never had.
+    /// The filter goes first: a code in it whose `INSERT` fails is a harmless false
+    /// positive, while a committed row missing from it could 404.
     pub async fn shorten(&self, url: String) -> anyhow::Result<String> {
         let id: i64 = sqlx::query_scalar("SELECT nextval('link_ids')")
             .fetch_one(&self.pool)
             .await?;
         let code = base62::encode(id as u64);
-        let mut redis = self.redis.clone();
 
         self.bloom.add(&code).await?;
 
@@ -103,124 +108,91 @@ impl Store {
             .execute(&self.pool)
             .await?;
 
-        redis
-            .set_ex::<_, _, ()>(&code, &url, CACHE_TTL_SECONDS)
-            .await?;
-
         Ok(code)
-    }
-
-    /// One `SET lease:{code} 1 NX EX ttl` attempt. `true` means this caller
-    /// now holds the lease.
-    async fn try_acquire_lease(&self, code: &str) -> anyhow::Result<bool> {
-        let acquired: Option<String> = redis::cmd("SET")
-            .arg(lease_key(code))
-            .arg(1)
-            .arg("NX")
-            .arg("EX")
-            .arg(LEASE_TTL_SECONDS)
-            .query_async(&mut self.redis.clone())
-            .await?;
-        Ok(acquired.is_some())
     }
 
     /// Change a code's destination. `false` means no such code.
     pub async fn update(&self, code: &str, url: &str) -> anyhow::Result<bool> {
-        let query = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
+        let result = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
             .bind(code)
-            .bind(url);
-        self.write_and_invalidate(code, query).await
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
+        self.invalidate(code).await;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Remove a code entirely. `false` means no such code.
     pub async fn delete(&self, code: &str) -> anyhow::Result<bool> {
-        let query = sqlx::query("DELETE FROM links WHERE code = $1").bind(code);
-        self.write_and_invalidate(code, query).await
+        let result = sqlx::query("DELETE FROM links WHERE code = $1")
+            .bind(code)
+            .execute(&self.pool)
+            .await?;
+        self.invalidate(code).await;
+        Ok(result.rows_affected() > 0)
     }
 
-    /// Run a write, then drop the cached value, holding the lease across both.
-    /// Without it, a rebuild that `SELECT`ed the old URL could `SET` it back
-    /// right after this `DEL`, stale for a full TTL.
-    async fn write_and_invalidate(
-        &self,
-        code: &str,
-        query: Query<'_, Postgres, PgArguments>,
-    ) -> anyhow::Result<bool> {
-        while !self.try_acquire_lease(code).await? {
-            tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
+    /// Runs after the database write has committed, so failing here can't undo
+    /// it. The value stays stale until its TTL runs out. If the key holds a note,
+    /// this also cancels that rebuild: its `SET ... IFEQ` will find nothing.
+    async fn invalidate(&self, code: &str) {
+        if let Err(e) = self.redis.clone().del::<_, ()>(code).await {
+            log_redis_error(e);
         }
-
-        let mut redis = self.redis.clone();
-        let outcome = async {
-            let found = query.execute(&self.pool).await?.rows_affected() > 0;
-            if found {
-                redis.del::<_, ()>(code).await?;
-            }
-            Ok(found)
-        }
-        .await;
-
-        redis.del::<_, ()>(lease_key(code)).await?;
-        outcome
     }
 
-    /// Look up the long URL for a code: Redis first, then the Bloom filter,
-    /// then the lease-guarded rebuild.
+    /// Look up the long URL for a code. If Redis fails, read Postgres without
+    /// caching, because Postgres can still answer.
+    ///
+    /// On a miss, the first reader to `SET` a note rebuilds the key. Readers that
+    /// find a note wait for the value, and after `WAIT_LIMIT` read Postgres
+    /// without caching.
     pub async fn resolve(&self, code: &str) -> anyhow::Result<Option<String>> {
         if !base62::is_valid(code) {
             return Ok(None);
         }
 
-        match self.redis.clone().get::<_, Option<String>>(code).await {
-            Ok(Some(url)) => return Ok(Some(url)),
-            Ok(None) => {}
-            Err(e) => {
-                log_redis_error(e);
-                return self.read_postgres(code).await;
-            }
-        }
-
-        match self.bloom.might_exist(code).await {
-            Ok(false) => return Ok(None),
-            Ok(true) => {}
-            Err(e) => {
-                log_redis_error(e);
-                return self.read_postgres(code).await;
-            }
-        }
-
-        self.resolve_miss(code).await
-    }
-
-    /// Whoever gets the lease rebuilds; everyone else sleeps and tries again,
-    /// for the lease itself and not just the key. If the holder crashes, its
-    /// lease expires and the next waiter takes over, so while Redis works no
-    /// request queries Postgres unguarded and none is blocked forever.
-    async fn resolve_miss(&self, code: &str) -> anyhow::Result<Option<String>> {
-        let mut redis = self.redis.clone();
-
+        let deadline = Instant::now() + WAIT_LIMIT;
         loop {
-            match redis.get::<_, Option<String>>(code).await {
-                Ok(Some(url)) => return Ok(Some(url)),
-                Ok(None) => {}
+            let cached = match self.redis.clone().get::<_, Option<String>>(code).await {
+                Ok(cached) => cached,
                 Err(e) => {
                     log_redis_error(e);
                     return self.read_postgres(code).await;
                 }
+            };
+            match cached {
+                Some(note) if note.starts_with(NOTE_PREFIX) => {
+                    if Instant::now() >= deadline {
+                        return self.read_postgres(code).await;
+                    }
+                    tokio::time::sleep(WAIT_STEP).await;
+                    continue;
+                }
+                Some(url) => return Ok(Some(url)),
+                None => {}
             }
 
-            match self.try_acquire_lease(code).await {
-                Ok(true) => {
-                    // Released on every outcome, so a failed query doesn't stall
-                    // every waiter for the full lease TTL. If the release fails,
-                    // that TTL still ends it.
-                    let outcome = self.rebuild(code).await;
-                    if let Err(e) = redis.del::<_, ()>(lease_key(code)).await {
-                        log_redis_error(e);
-                    }
-                    return outcome;
-                }
-                Ok(false) => tokio::time::sleep(LEASE_RETRY_INTERVAL).await,
+            // A failed check means "maybe": only Postgres can say a code doesn't exist.
+            match self.bloom.might_exist(code).await {
+                Ok(false) => return Ok(None),
+                Ok(true) => {}
+                Err(e) => log_redis_error(e),
+            }
+
+            let note = new_note();
+            let won: Result<Option<String>, _> = redis::cmd("SET")
+                .arg(code)
+                .arg(&note)
+                .arg("NX")
+                .arg("PX")
+                .arg(NOTE_TTL_MS)
+                .query_async(&mut self.redis.clone())
+                .await;
+            match won {
+                Ok(Some(_)) => return self.rebuild(code, &note).await,
+                // Another reader left its note first: go back and wait for it.
+                Ok(None) => continue,
                 Err(e) => {
                     log_redis_error(e);
                     return self.read_postgres(code).await;
@@ -229,34 +201,43 @@ impl Store {
         }
     }
 
-    /// Read Postgres without touching the cache. Used alone when Redis has failed:
-    /// with no working lease to guard it, this path must not write a value back.
+    /// Fill a key this reader holds the note for. Each write only lands if the
+    /// note is still there: a `DEL` in between means the value read is stale.
+    async fn rebuild(&self, code: &str, note: &str) -> anyhow::Result<Option<String>> {
+        let url = self.read_postgres(code).await;
+        let cmd = match &url {
+            Ok(Some(url)) => {
+                let mut cmd = redis::cmd("SET");
+                cmd.arg(code)
+                    .arg(url)
+                    .arg("IFEQ")
+                    .arg(note)
+                    .arg("EX")
+                    .arg(jittered_ttl());
+                cmd
+            }
+            // Free the key now instead of making readers wait out the note.
+            _ => {
+                let mut cmd = redis::cmd("DELEX");
+                cmd.arg(code).arg("IFEQ").arg(note);
+                cmd
+            }
+        };
+        if let Err(e) = cmd.query_async::<()>(&mut self.redis.clone()).await {
+            log_redis_error(e);
+        }
+        url
+    }
+
     async fn read_postgres(&self, code: &str) -> anyhow::Result<Option<String>> {
         self.postgres_queries.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(self.demo_query_delay).await;
-
-        Ok(sqlx::query_scalar(
+        let url = sqlx::query_scalar(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(code)
         .fetch_optional(&self.pool)
-        .await?)
-    }
-
-    /// Query Postgres and, on a hit, populate the cache.
-    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
-        let url = self.read_postgres(code).await?;
-
-        if let Some(url) = &url
-            && let Err(e) = self
-                .redis
-                .clone()
-                .set_ex::<_, _, ()>(code, url, CACHE_TTL_SECONDS)
-                .await
-        {
-            log_redis_error(e);
-        }
-
+        .await?;
+        tokio::time::sleep(self.demo_query_delay).await;
         Ok(url)
     }
 
@@ -282,14 +263,12 @@ mod tests {
             .expect("connect to test services")
     }
 
-    async fn test_redis() -> redis::aio::MultiplexedConnection {
-        redis::Client::open(
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6382".into()),
-        )
-        .unwrap()
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap()
+    async fn admin_redis() -> redis::aio::MultiplexedConnection {
+        redis::Client::open(Config::from_env().redis_url)
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -303,85 +282,178 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn resolves_what_it_stored() {
-        let store = test_store().await;
-        let code = store
-            .shorten("https://example.com/long/path".into())
-            .await
-            .unwrap();
-        assert_eq!(
-            store.resolve(&code).await.unwrap(),
-            Some("https://example.com/long/path".to_string())
-        );
-    }
-
-    #[tokio::test]
-    #[ignore]
     async fn unknown_code_resolves_to_none() {
         let store = test_store().await;
-        assert_eq!(store.resolve("does-not-exist").await.unwrap(), None);
+        assert_eq!(store.resolve("doesNotExist").await.unwrap(), None);
     }
 
-    /// The property this tier adds: `shorten` writes through, so the first
-    /// `resolve` is a cache hit and never queries Postgres.
+    /// The whole point of the tier: only the first read reaches Postgres, and
+    /// it caches the value with a TTL.
     #[tokio::test]
     #[ignore]
-    async fn resolve_hits_cache_without_a_prior_miss() {
+    async fn the_first_read_fills_the_cache() {
         let store = test_store().await;
-        let code = store
-            .shorten("https://cached.example".into())
-            .await
-            .unwrap();
+        let code = store.shorten("https://a.example".into()).await.unwrap();
+
+        for _ in 0..3 {
+            assert_eq!(
+                store.resolve(&code).await.unwrap().as_deref(),
+                Some("https://a.example")
+            );
+        }
+
+        assert_eq!(store.postgres_query_count(), 1);
+        let ttl: i64 = admin_redis().await.ttl(&code).await.unwrap();
+        let max = (CACHE_TTL_SECONDS + CACHE_TTL_JITTER_SECONDS) as i64;
+        assert!(ttl > 0 && ttl <= max, "ttl was {ttl}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn writes_invalidate_the_cache() {
+        let store = test_store().await;
+        let code = store.shorten("https://old.example".into()).await.unwrap();
+        store.resolve(&code).await.unwrap();
+
+        assert!(store.update(&code, "https://new.example").await.unwrap());
         assert_eq!(
-            store.resolve(&code).await.unwrap(),
-            Some("https://cached.example".to_string())
-        );
-        assert_eq!(store.postgres_query_count(), 0);
-    }
-
-    /// Keys that aren't codes mustn't be read back as if they were.
-    #[tokio::test]
-    #[ignore]
-    async fn redis_keys_are_not_resolvable() {
-        let store = test_store().await;
-        assert_eq!(store.resolve("codes_bloom").await.unwrap(), None);
-        assert_eq!(store.resolve("bloom:ready").await.unwrap(), None);
-    }
-
-    /// `update` must wait for the miss path's lease rather than racing it. A
-    /// lease held by "someone else" (set by hand) has to expire first.
-    #[tokio::test]
-    #[ignore]
-    async fn update_waits_for_an_outstanding_lease() {
-        let store = test_store().await;
-        let code = store
-            .shorten("https://before.example".into())
-            .await
-            .unwrap();
-
-        let mut redis = test_redis().await;
-        let _: () = redis::cmd("SET")
-            .arg(lease_key(&code))
-            .arg(1)
-            .arg("NX")
-            .arg("EX")
-            .arg(2)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
-
-        let started = std::time::Instant::now();
-        assert!(store.update(&code, "https://after.example").await.unwrap());
-        assert!(
-            started.elapsed() >= Duration::from_millis(1500),
-            "update should have waited for the 2s lease, took {:?}",
-            started.elapsed()
+            store.resolve(&code).await.unwrap().as_deref(),
+            Some("https://new.example")
         );
 
+        assert!(store.delete(&code).await.unwrap());
+        assert_eq!(store.resolve(&code).await.unwrap(), None);
+        assert!(!store.delete(&code).await.unwrap());
+    }
+
+    /// Race 2 in `docs/race-conditions.md`, closed: the write's `DEL` removes
+    /// the slow reader's note, so its `SET ... IFEQ` is refused.
+    #[tokio::test]
+    #[ignore]
+    async fn a_slow_read_cannot_cache_a_stale_value() {
+        let mut store = test_store().await;
+        store.demo_query_delay = Duration::from_millis(300);
+        let code = store.shorten("https://old.example".into()).await.unwrap();
+
+        let (read, _) = tokio::join!(store.resolve(&code), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            store.update(&code, "https://new.example").await.unwrap()
+        });
+        assert_eq!(read.unwrap().as_deref(), Some("https://old.example"));
+
+        let cached: Option<String> = admin_redis().await.get(&code).await.unwrap();
+        assert_eq!(cached, None, "the stale fill must be refused");
         assert_eq!(
-            store.resolve(&code).await.unwrap(),
-            Some("https://after.example".to_string())
+            store.resolve(&code).await.unwrap().as_deref(),
+            Some("https://new.example")
         );
+    }
+
+    /// Any interleaving of reads and writes, as long as every Redis command
+    /// succeeds, leaves the cache empty or equal to Postgres. Only a lost `DEL`
+    /// can leave it stale.
+    #[tokio::test]
+    #[ignore]
+    async fn mixed_reads_and_writes_never_leave_a_stale_value() {
+        let mut store = test_store().await;
+        store.demo_query_delay = Duration::from_millis(20);
+        let store = std::sync::Arc::new(store);
+        let code = store.shorten("https://v0.example".into()).await.unwrap();
+
+        for round in 1..=50 {
+            let mut tasks = tokio::task::JoinSet::new();
+            for _ in 0..3 {
+                let (store, code) = (store.clone(), code.clone());
+                tasks.spawn(async move {
+                    store.resolve(&code).await.unwrap();
+                });
+            }
+            let (store2, code2) = (store.clone(), code.clone());
+            tasks.spawn(async move {
+                let wait = (round * 7) % 30;
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                let url = format!("https://v{round}.example");
+                store2.update(&code2, &url).await.unwrap();
+            });
+            tasks.join_all().await;
+
+            let cached: Option<String> = admin_redis().await.get(&code).await.unwrap();
+            let current = format!("https://v{round}.example");
+            assert!(
+                cached.is_none() || cached.as_deref() == Some(current.as_str()),
+                "round {round}: cache has {cached:?}, Postgres has {current}"
+            );
+        }
+    }
+
+    /// The stampede: many readers miss one key at once, and only one of them
+    /// queries Postgres.
+    #[tokio::test]
+    #[ignore]
+    async fn concurrent_misses_query_postgres_once() {
+        let mut store = test_store().await;
+        store.demo_query_delay = Duration::from_millis(100);
+        let store = std::sync::Arc::new(store);
+        let code = store.shorten("https://hot.example".into()).await.unwrap();
+
+        let mut readers = tokio::task::JoinSet::new();
+        for _ in 0..20 {
+            let (store, code) = (store.clone(), code.clone());
+            readers.spawn(async move { store.resolve(&code).await.unwrap() });
+        }
+        for url in readers.join_all().await {
+            assert_eq!(url.as_deref(), Some("https://hot.example"));
+        }
+        assert_eq!(store.postgres_query_count(), 1);
+    }
+
+    /// A rebuilder that dies leaves its note behind. Readers don't wait on it
+    /// forever, and once it expires the next reader rebuilds.
+    #[tokio::test]
+    #[ignore]
+    async fn readers_get_past_an_abandoned_note() {
+        let store = test_store().await;
+        let code = store.shorten("https://a.example".into()).await.unwrap();
+        let mut admin = admin_redis().await;
+        let _: () = admin.pset_ex(&code, new_note(), NOTE_TTL_MS).await.unwrap();
+
+        let started = Instant::now();
+        assert_eq!(
+            store.resolve(&code).await.unwrap().as_deref(),
+            Some("https://a.example")
+        );
+        assert!(started.elapsed() < WAIT_LIMIT + WAIT_STEP * 2);
+        let cached: String = admin.get(&code).await.unwrap();
+        assert!(cached.starts_with(NOTE_PREFIX), "a waiter mustn't cache");
+
+        let _: () = admin.pexpire(&code, 1).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        store.resolve(&code).await.unwrap();
+        let cached: String = admin.get(&code).await.unwrap();
+        assert_eq!(cached, "https://a.example");
+    }
+
+    /// A deleted code frees its key right away, instead of leaving a note
+    /// readers would wait on.
+    #[tokio::test]
+    #[ignore]
+    async fn a_missing_row_frees_the_key() {
+        let store = test_store().await;
+        let code = store.shorten("https://gone.example".into()).await.unwrap();
+        store.delete(&code).await.unwrap();
+
+        assert_eq!(store.resolve(&code).await.unwrap(), None);
+        let exists: bool = admin_redis().await.exists(&code).await.unwrap();
+        assert!(!exists);
+    }
+
+    #[test]
+    fn ttls_include_jitter() {
+        let ttls: std::collections::HashSet<u64> = (0..1000).map(|_| jittered_ttl()).collect();
+        assert!(ttls.len() > 1);
+        assert!(ttls.iter().all(|t| {
+            (CACHE_TTL_SECONDS..=CACHE_TTL_SECONDS + CACHE_TTL_JITTER_SECONDS).contains(t)
+        }));
     }
 
     /// A dropped connection must heal by itself: restarting Redis shouldn't
@@ -391,50 +463,34 @@ mod tests {
     async fn recovers_after_the_connection_drops() {
         let store = test_store().await;
         let code = store.shorten("https://back.example".into()).await.unwrap();
+        store.resolve(&code).await.unwrap();
 
-        let redis_url = crate::config::Config::from_env().redis_url;
-        let mut admin = redis::Client::open(redis_url)
-            .unwrap()
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
         let killed: i64 = redis::cmd("CLIENT")
             .arg("KILL")
             .arg("TYPE")
             .arg("normal")
             .arg("SKIPME")
             .arg("yes")
-            .query_async(&mut admin)
+            .query_async(&mut admin_redis().await)
             .await
             .unwrap();
         assert!(killed > 0);
 
-        let mut resolved = None;
-        for _ in 0..50 {
-            if let Ok(url) = store.resolve(&code).await {
-                resolved = url;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(resolved.as_deref(), Some("https://back.example"));
+        store.resolve(&code).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _: () = store.redis.clone().del(&code).await.unwrap();
     }
 
-    /// A failing cache must cost speed, not availability. Covers a failed `GET`, filter check and lease.
+    /// A failing cache must cost speed, not availability. Revoking commands from
+    /// the app's user makes them fail on demand; `admin` keeps the power to
+    /// restore them.
     #[tokio::test]
     #[ignore]
-    async fn reads_survive_redis_failures() {
+    async fn reads_and_writes_survive_redis_failures() {
         let store = test_store().await;
         let code = store.shorten("https://db.example".into()).await.unwrap();
 
-        // Revoking commands from the app's user makes them fail on demand. This
-        // separate user keeps the power to delete the key and restore them.
-        let redis_url = crate::config::Config::from_env().redis_url;
-        let mut admin = redis::Client::open(redis_url)
-            .unwrap()
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
+        let mut admin = admin_redis().await;
         let _: () = redis::cmd("ACL")
             .arg("SETUSER")
             .arg("admin")
@@ -451,20 +507,16 @@ mod tests {
             .query_async(&mut admin)
             .await
             .unwrap();
-
-        let acl = {
-            let admin = admin.clone();
-            move |rule: &'static str| {
-                let mut admin = admin.clone();
-                async move {
-                    let _: () = redis::cmd("ACL")
-                        .arg("SETUSER")
-                        .arg("default")
-                        .arg(rule)
-                        .query_async(&mut admin)
-                        .await
-                        .unwrap();
-                }
+        let acl = |rule: &'static str| {
+            let mut admin = admin.clone();
+            async move {
+                let _: () = redis::cmd("ACL")
+                    .arg("SETUSER")
+                    .arg("default")
+                    .arg(rule)
+                    .query_async(&mut admin)
+                    .await
+                    .unwrap();
             }
         };
 
@@ -473,15 +525,25 @@ mod tests {
             ("-bf.exists", "+bf.exists"),
             ("-set", "+set"),
         ] {
-            let _: () = admin.del(&code).await.unwrap();
             acl(revoke).await;
             let resolved = store.resolve(&code).await;
+            let updated = store.update(&code, "https://db.example").await;
             acl(restore).await;
             assert_eq!(
                 resolved.unwrap().as_deref(),
                 Some("https://db.example"),
                 "with {revoke}"
             );
+            assert!(updated.unwrap(), "with {revoke}");
         }
+    }
+
+    /// Keys that aren't codes mustn't be read back as if they were.
+    #[tokio::test]
+    #[ignore]
+    async fn redis_keys_are_not_resolvable() {
+        let store = test_store().await;
+        assert_eq!(store.resolve("codes_bloom").await.unwrap(), None);
+        assert_eq!(store.resolve("bloom:ready").await.unwrap(), None);
     }
 }

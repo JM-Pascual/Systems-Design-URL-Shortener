@@ -1,42 +1,35 @@
-# Sequence: writes invalidate the cache, one lease serializes cache writes, and the Bloom job runs behind them.
+# Sequence: a note in the cached key lets one reader rebuild it, and a write's DEL cancels that rebuild.
 ...@_style
 ...@_icons
 
-title: Tier 4.3 - Invalidation and a lease {class: title}
+title: Tier 4.3 - A note in the key {class: title}
 
 flow: "" {
   shape: sequence_diagram
-  client: Client {class: svc}
-  app: App process {class: [svc; rust]}
-  job: Bloom job {class: svc}
+  c1: Reader C_1 {class: svc}
+  c2: Reader C_2 {class: svc}
+  writer: Writer {class: svc}
   redis: "Redis, volatile-lfu" {class: [svc; redis]}
-  postgres: Postgres links {class: [svc; postgres]}
-  bucket: Bucket {class: [svc; aws-s3]}
+  postgres: Postgres {class: [svc; postgres]}
 
   miss: "GET /{code}, cache miss" {
-    client -> app: follows code
-    app -> redis: GET value
-    app -> redis: checks Bloom filter
-    app -> redis: "SET lease NX" {class: critical-path}
-    redis -> app: "lost: wait 50 ms, retry"
-    app -> postgres: "won: SELECT"
-    app -> redis: SET value
-    app -> redis: DEL lease
-    app -> client: 307 redirect
+    c1 -> redis: "GET: nil, then BF.EXISTS"
+    c1 -> redis: "SET code note NX PX 2000" {class: critical-path}
+    c2 -> redis: "GET: a note, so wait 50 ms"
+    c1 -> postgres: SELECT
+    c1 -> redis: "SET code url IFEQ note EX 300-310" {class: critical-path}
+    c2 -> redis: "GET: the url"
   }
 
-  write: "PATCH or DELETE /{code}" {
-    client -> app: changes link
-    app -> redis: "waits for lease" {class: critical-path}
-    app -> postgres: UPDATE or DELETE
-    app -> redis: DEL value
-    app -> redis: DEL lease
-    app -> client: 204 No Content
+  write: "PATCH /{code} during a rebuild" {
+    c1 -> redis: "SET code note NX PX 2000"
+    c1 -> postgres: "SELECT: old url"
+    writer -> postgres: UPDATE
+    writer -> redis: "DEL code: removes the note"
+    c1 -> redis: "SET ... IFEQ note: refused" {class: critical-path}
   }
 
-  maintain: "Every minute, from Tier 4.2" {
-    job -> postgres: reads codes {class: async}
-    job -> redis: adds to Bloom filter {class: async}
-    job -> bucket: "daily: uploads snapshot" {class: async}
+  gone: "No row, or the rebuild fails" {
+    c1 -> redis: "DELEX code IFEQ note"
   }
 }
