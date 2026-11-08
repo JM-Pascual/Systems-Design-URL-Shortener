@@ -30,20 +30,19 @@ So **the filter may only say "absent" if it's known to be complete.** The key
 | set | 1 | Asks Postgres (could be a false positive) |
 | set | 0 | Returns 404 without a query |
 
+If the filter check itself fails, or the flag is missing, `resolve` asks Postgres.
+
 A flush removes the flag along with the filter, so a wiped Redis falls back to
 the safe path by itself, with the app still running.
-
-If the filter check itself fails, `resolve` treats that like a missing flag and
-asks Postgres.
 
 `resolve` also rejects anything that couldn't be a code before touching Redis.
 Otherwise `GET /bloom:ready` would read the flag and redirect to it.
 
 ## Writing to the filter
 
-`shorten` adds the code *before* the `INSERT`, the opposite order from the value
-cache. A code in the filter whose `INSERT` fails is a false positive. A committed
-row missing from the filter would be a false negative.
+`shorten` adds the code *before* the `INSERT`, the opposite of Tier 4.1's rule of
+writing Postgres first. A code in the filter whose `INSERT` fails is a false positive.
+A committed row missing from the filter would be a false negative.
 
 It uses `BF.INSERT ... CAPACITY n ERROR e` rather than `BF.ADD`. After a flush,
 the next `shorten` recreates the filter either way, but `BF.ADD` would create it
@@ -110,9 +109,8 @@ The job then scans `links`, and misses go to Postgres until it finishes.
 
 | Problem | Status |
 |---|---|
-| A link can't be edited or deleted, because nothing invalidates the cache. | Fixed in Tier 4.3 |
-| No coordination on a cache-miss stampede. | Fixed in Tier 4.3 |
-| While Redis is down, reads fall back to Postgres with no limit on the load, and writes return 500. | Open problem |
+| Tier 4.1's thundering herd and stale set are still here. | Fixed in Tier 4.3 |
+| While Redis is down, `shorten` returns 500, because it can't add to the filter. Reads fall back to Postgres with no limit on the load. | Open problem |
 | A code lost in a Redis crash can 404 for up to a minute, until the job repairs it. | Accepted |
 
 ## Discussion questions
@@ -128,4 +126,4 @@ The job then scans `links`, and misses go to Postgres until it finishes.
    has to happen to writes in the meantime?
 
 **Previous:** [Tier 4.1 — Cache-Aside](../tier-4.1-caching/README.md) ·
-**Next:** [Tier 4.3 — Invalidation and a Lease](../tier-4.3-caching/README.md)
+**Next:** [Tier 4.3 — A Note in the Key](../tier-4.3-caching/README.md)

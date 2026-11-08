@@ -17,7 +17,6 @@ flow: "" {
     client -> app: long URL
     app -> redis: "1. BF.INSERT"
     app -> postgres: "2. INSERT"
-    app -> redis: "3. SET value"
   }
 
   resolve: "GET /{code}" {

@@ -1,106 +1,76 @@
 # Tier 4.1 — Caching with Redis: Cache-Aside
 
-**Problem being solved:** Tier 3 fixed durability by moving the mapping into
-Postgres, but that traded away Tier 1's O(1) in-memory lookup for a B-tree
-lookup that has to hit disk. Every redirect — Tier 0's ~99% of traffic — now
-pays that cost. This tier puts Redis in front of Postgres so most redirects
-never touch the database at all.
+**Problem being solved:** Tier 3 fixed durability, but now every redirect, about 99%
+of traffic, costs a database query. This tier puts Redis in front of Postgres so most
+redirects never reach the database.
+
+Redis is **Tier 1's hash table, moved onto the network and shared between processes**:
+`GET` and `SET` are `HashMap::get` and `insert` over a wire. It keeps its data in its
+own memory, so it's fast, and it runs as a separate process, so it can fail on its own.
 
 ![Tier 4.1 request flow](../docs/diagrams/tier-4.1-caching.svg)
 
 ---
 
-## Cache-aside, concretely
+## The whole design
 
-`resolve` (the redirect path):
-1. `GET` the code from Redis.
-2. On a hit, return it — Postgres is never touched.
-3. On a miss, run Tier 3's `SELECT` against Postgres, then `SET` the result
-   into Redis with a TTL before returning it.
+This is called **cache-aside**, or look-aside: the app talks to both Redis and Postgres,
+and Redis never talks to the database.
 
-`shorten` writes through: after Tier 3's `INSERT`, it also `SET`s the new
-mapping into Redis — so a code's *first* redirect is already a cache hit
-instead of a guaranteed miss.
+| Operation | What happens |
+|---|---|
+| `GET /{code}` | `GET` from Redis. On a miss, `SELECT` from Postgres, then `SET` with a TTL. |
+| `POST /shorten` | `INSERT` into Postgres. The cache fills on the first read. |
+| `PATCH` or `DELETE /{code}` | Write to Postgres, then `DEL` the key from Redis. |
 
-Redis is framed deliberately as **Tier 1's hash table, moved onto the
-network and shared between processes** — same structure (`GET`/`SET` is
-just `HashMap::get`/`insert` over a wire), different location. If that
-mental model from Tier 1 stuck, this tier is mostly plumbing.
+Three rules hold it together:
 
-### Why Postgres is written before Redis, not after
+1. **Postgres is the truth, and Redis only holds copies.** Postgres is always written
+   first, so a failed write can't leave Redis with a URL the database never had.
+2. **Writes delete the cached value instead of updating it.** A delete can be repeated
+   safely, and the next read fetches the current value.
+3. **A broken cache costs speed, not availability.** If Redis fails, a read counts as a
+   miss and asks Postgres. The app reconnects by itself once Redis is back.
 
-`shorten` does `INSERT` then `SET`, in that order, on purpose. Writing Redis
-*first* would make a code externally resolvable before its row is durably
-committed: a failed `INSERT` after a successful `SET` would leave Redis
-confidently pointing at a URL Postgres never actually has. Durable-source-of-
-truth-first, cache-second is the rule; getting this backwards is a real
-correctness bug, not just a stylistic preference.
+## The TTL: stale, but it fixes itself
 
-### What a racing `SET` actually does
+Every cached value expires after **5 minutes**, and that's the design's safety net.
+Whatever goes wrong, a wrong value lives for at most one TTL:
 
-Two concurrent requests writing the same key doesn't merge or compare
-anything — `SET key value EX ttl` unconditionally overwrites whatever was
-there, value and TTL both. Whichever `SET` lands last simply wins. It's
-harmless here specifically because both racing writes compute the identical
-value from the same immutable row; if the value being cached could ever
-differ between two writers, this same mechanism would silently let a stale
-write clobber a fresh one.
+- `DEL` fails after a write: the write stays committed, and the old value expires.
+- A race caches an old URL: it expires too.
+- Someone edits Postgres by hand: same.
 
-### If Redis fails
+No code has to detect any of this. It's a cheap way to stay simple, and the TTL becomes
+the tradeoff: a shorter one means less staleness and more Postgres queries.
 
-Postgres holds every link, so a failing cache should cost speed, not availability.
-A failed `GET` counts as a miss and the request reads Postgres. That path doesn't
-write the value back, and a failed `SET` after a normal miss is only logged. The
-connection reconnects by itself once Redis returns.
-
-Writes are different: `POST /shorten` still returns 500 while Redis is down. And
-with no limit, the full read load lands on Postgres.
-
-### This version is deliberately vulnerable to a thundering herd
-
-There is no coordination at all yet: if a hot key's TTL lapses under
-sustained load, every in-flight request misses Redis in the same instant and
-every one of them independently queries Postgres to rebuild the identical
-entry. That's a later quarter's problem to fix (distributed lock /
-singleflight / stale-while-revalidate) — building the unprotected version
-first is the right order, since the mitigation only makes sense once you've
-felt the failure it's fixing.
+AWS presents this same pairing, lazy loading plus a TTL, as the way to get the benefits of
+both lazy loading and write-through. It admits the TTL can't rule out staleness, but says
+"it keeps data from getting too stale"
+([ElastiCache caching strategies](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html)).
+The 5 minutes is the value its lazy-loading example uses, and every later tier keeps it.
 
 ---
 
-## What breaks here
+## What breaks here, on purpose
 
 | Problem | Status |
 |---|---|
-| A `resolve` for a code that was never minted still costs a full Postgres query, every time. | Fixed in Tier 4.2 — Bloom filter |
-| No coordination on a cache-miss stampede (thundering herd). | Fixed in Tier 4.3 — a lease |
-| Still one counter in one process. | Open problem |
-| While Redis is down, reads fall back to Postgres with no limit on the load, and writes return 500. | Open problem |
-
----
+| **Thundering herd:** when a hot key expires, every request misses at once and all of them query Postgres. | Fixed in Tier 4.3 |
+| **Stale set:** a read that started before a write can cache the old URL after the write's `DEL`. See [Race 2](../docs/race-conditions.md). A test reproduces it. | Fixed in Tier 4.3 |
+| A code that was never minted costs a Postgres query on every request. | Fixed in Tier 4.2 |
+| While Redis is down, the full read load lands on Postgres. | Open problem |
 
 ## Discussion questions
 
-1. `CACHE_TTL_SECONDS` is a flat 300 seconds regardless of a link's actual
-   traffic. Tier 0 §3.1 said access is Zipfian — a few URLs take most of the
-   traffic. What would a smarter TTL policy look like, and what would it
-   need to know that a flat constant doesn't?
-2. `resolve` never writes to Redis on a miss that also misses Postgres (a
-   `None` result is never cached), so a code that was never minted pays a
-   full Postgres query on *every* request. What's a cheap way to short-
-   circuit that without caching a real value?
-3. Nothing invalidates a cached entry yet, because there's no `PATCH`/`DELETE`
-   to invalidate it *for*. Once Tier 0's deferred `PATCH /{code}` exists,
-   walk through what has to happen in `shorten`'s Postgres-then-Redis
-   ordering discipline for an *update* instead of an insert.
-4. `resolve`'s Redis check and Postgres fallback happen sequentially. Under
-   what circumstance would checking both *concurrently* (e.g. `tokio::join!`)
-   be a bad idea, given the whole point of caching is to avoid the Postgres
-   query on a hit?
-5. Estimate the redirect latency win. Tier 3's discussion questions had you
-   measure a Postgres round trip; look up a typical local Redis `GET`
-   latency and compare. At Tier 0's ~4,000 reads/sec, what does the
-   database's query load look like once, say, 95% of reads hit cache?
+1. If Tier 0 accepts a stale redirect, how long is too long? Pick a TTL and defend it.
+   What changes if the link is a phishing page someone just deleted?
+2. Walk through the stale set in `a_slow_read_can_cache_a_stale_value`. Why doesn't
+   writing to Redis before Postgres fix it?
+3. Why does a `DELETE` return success when its `DEL` fails? What would the user see,
+   and for how long?
+4. At about 4,000 reads/s and a 95% hit rate, how many queries reach Postgres? What
+   happens to that number in the first second after Redis restarts empty?
 
 **Previous:** [Tier 3 — Persistence](../tier-3-persistence/README.md) ·
 **Next:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md)

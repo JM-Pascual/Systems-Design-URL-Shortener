@@ -1,4 +1,4 @@
-# Sequence: cache-aside reads, and writes that go through to the cache.
+# Sequence: cache-aside reads, and writes that invalidate the cache.
 ...@_style
 ...@_icons
 
@@ -16,14 +16,20 @@ flow: "" {
     app -> redis: GET {class: critical-path}
     redis -> app: "URL, or a miss"
     app -> postgres: SELECT on a miss
-    app -> redis: SET with TTL
+    app -> redis: SET with 5 min TTL
     app -> client: 307 redirect
   }
 
   create: "POST /shorten" {
     client -> app: long URL
-    app -> postgres: "1. INSERT"
-    app -> redis: "2. SET with TTL"
+    app -> postgres: INSERT
     app -> client: 201 with code
+  }
+
+  change: "PATCH or DELETE /{code}" {
+    client -> app: changes link
+    app -> postgres: "1. UPDATE or DELETE"
+    app -> redis: "2. DEL"
+    app -> client: 204 No Content
   }
 }

@@ -22,7 +22,7 @@ services:
       retries: 15
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.4
     restart: unless-stopped
     ports:
       - "6380:6379"

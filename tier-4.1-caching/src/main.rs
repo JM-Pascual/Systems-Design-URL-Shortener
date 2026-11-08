@@ -35,6 +35,11 @@ struct ShortenRequest {
     url: String,
 }
 
+#[derive(Deserialize)]
+struct PatchRequest {
+    url: String,
+}
+
 #[derive(Serialize)]
 struct ShortenResponse {
     code: String,
@@ -74,6 +79,43 @@ async fn redirect(
     match url {
         Some(url) => Ok(Redirect::temporary(&url)),
         None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// `PATCH /{code}` — change a code's destination.
+async fn patch_link(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+    Json(req): Json<PatchRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let updated = state
+        .store
+        .update(&code, &req.url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if updated {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// `DELETE /{code}` — remove a code entirely.
+async fn delete_link(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let deleted = state
+        .store
+        .delete(&code)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
     }
 }
 
@@ -117,7 +159,10 @@ async fn main() {
         .route("/shorten", post(shorten))
         .route("/stats", get(stats))
         .route("/metrics", get(metrics))
-        .route("/{code}", get(redirect))
+        .route(
+            "/{code}",
+            get(redirect).patch(patch_link).delete(delete_link),
+        )
         .with_state(Arc::clone(&state));
 
     // Configurable so the thundering-herd demo can run several tiers side by
