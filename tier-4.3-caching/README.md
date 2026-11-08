@@ -1,161 +1,110 @@
-# Tier 4.3 — Caching with Redis: Invalidation and a Lease
+# Tier 4.3 — Caching with Redis: A Note in the Key
 
-A copy of [Tier 4.2](../tier-4.2-caching/README.md) plus three additions
-that all serve the same goal: closing the gaps between "the cache says X"
-and "the database says Y." It keeps Tier 4.2's Bloom filter job, including its
-snapshots in a bucket.
+A copy of [Tier 4.2](../tier-4.2-caching/README.md) with a new read path and real eviction
+settings. Only `src/store.rs` and `docker-compose.yml` change.
+
+**Problem:** Tier 4.1 left two failures open on purpose:
+
+- **Thundering herd:** a hot key expires and every request queries Postgres at once.
+- **Stale set:** a slow read caches an old URL after a write's `DEL`
+  ([Race 2](../docs/race-conditions.md)).
+
+**Fix:** on a miss, the reader that rebuilds the key first leaves a **note** in it. Other
+readers see the note and wait. The rebuilder only writes the URL if its note is still there.
 
 ![Tier 4.3 request flow](../docs/diagrams/tier-4.3-caching.svg)
 
 ---
 
-## `PATCH`/`DELETE` and cache invalidation
+## The core decision: the note lives in the cached key
 
-Tier 0's two deferred write operations, finally implemented:
+A note is the value `"\0" + random hex`, stored under the code itself. No URL can start
+with a NUL byte, because Postgres `TEXT` can't hold one, so readers can tell the two apart.
 
-- **`PATCH /{code}`** — `UPDATE`s the row, then invalidates the cache with a
-  plain `DEL`.
-- **`DELETE /{code}`** — removes the row, then `DEL`s the cache entry too.
-  Without this, a deleted link would keep redirecting successfully off a
-  stale cached value until its TTL happened to lapse on its own — the
-  answer to "what does a cache hit mean once the row is gone?"
+Putting it in the same key is what makes the design small. Writers already send `DEL code`,
+and that one command now also cancels any rebuild in progress. The rebuilder's
+`SET ... IFEQ note` then finds nothing to match and is refused.
 
-Both write Postgres first, same durability discipline as `shorten`: only
-invalidate the cache once the new state is durably committed.
+This is how the reference designs do it:
 
-Both also hold the code's lease (the same `lease:{code}` the miss path uses,
-below) across the write and the `DEL`. Without that there's a classic
-cache-aside race: a `resolve` leader `SELECT`s the old URL, the `UPDATE` and
-`DEL` land in between, and the leader then `SET`s the old URL right back —
-stale for a full TTL, with nothing to invalidate it. Serializing *every*
-write to a code's cache entry on one lease, rebuild or invalidation, is
-what closes it.
+| Pattern | Where the marker lives | Fixes the stale set? | Cost |
+|---|---|---|---|
+| **Note in the key, `SET IFEQ`** (this tier) | In the cached key | Yes | Redis 8.4. Every reader must check for the prefix. |
+| Facebook's leases ([paper](https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf), §3.2.1) | Server-side token per key | Yes | Needs a modified memcached. |
+| Memcached meta commands (`N`, `W`, `Z` flags, [docs](https://docs.memcached.org/protocols/meta/)) | Empty placeholder item in the key | Yes, with CAS | Memcached, not Redis. |
+| [rueidisaside](https://github.com/redis/rueidis/tree/main/rueidisaside) | `rueidisid:` placeholder in the key | Yes | Lua scripts, written before `IFEQ` existed. This tier is the same design without them. |
+| [rockscache](https://github.com/dtm-labs/rockscache) | Hash fields `lockOwner`, `lockUntil` beside `value` | Yes, and serves stale while rebuilding | Lua for every operation. |
+| Separate `lock:{code}` key | A second key | **No**: a `DEL` of the value doesn't stop the rebuild | Two keys that can drift apart, and need a hash tag to share a Redis Cluster node. |
+| In-process singleflight | App memory | No | Only coalesces within one process. |
 
-`DEL` here is deliberately the *simple* invalidation strategy from Tier 4.1's
-discussion — "immediate `DEL` (simple, but stampedes on a hot key)" — rather
-than a write-through `SET`. That's not an oversight: it's the concrete
-trigger the lease below exists to defend against. A write-through `SET`
-would have made the lease largely unnecessary for this trigger, but it
-would have hidden the actual failure mode instead of fixing it.
+## Every Redis call
 
-One loose end, worth naming rather than silently accepting: `DELETE` cannot
-remove a code from the Bloom filter (Tier 4.2) — standard Bloom filters have
-no removal operation. Harmless, not a bug: `resolve` still falls through to
-Postgres and correctly returns `None`. The code loses the filter's fast path
-until the next manual rebuild, described in Tier 4.2.
+| Situation | Commands |
+|---|---|
+| Hit | `GET` |
+| Miss, first reader | `GET` → `BF.EXISTS` → `SET code note NX PX 2000` → `SELECT` → `SET code url IFEQ note EX 300–310` |
+| Miss, someone is rebuilding | `GET` every 50 ms. After 200 ms, `SELECT` without caching. |
+| No row, or the `SELECT` failed | `DELEX code IFEQ note`, so readers don't wait out the note |
+| `PATCH`, `DELETE` | `UPDATE` or `DELETE`, then `DEL code`. Writers never wait. |
+| Redis fails | `SELECT` without caching |
 
----
+Both conditional writes are single commands. `IFEQ` compares and writes atomically, so it
+needs no Lua script ([SET](https://redis.io/docs/latest/commands/set/),
+[DELEX](https://redis.io/docs/latest/commands/delex/)).
 
-## `volatile-lfu` eviction
+The note expires after 2 seconds, so a rebuilder that crashes frees the key on its own.
 
-`docker-compose.yml` now sets `maxmemory-policy volatile-lfu` on Redis. This
-is the second of the three thundering-herd triggers from the root README:
-under memory pressure, a naive eviction policy can evict a key that's still
-*hot*, not just old — collapsing to the exact same stampede as a TTL lapsing,
-just triggered by memory instead of the clock. LFU (least-*frequently*-used,
-tracked via an access counter rather than recency) keeps a hot key resident
-specifically because it's still being read, which is what makes Tier 0's
-Zipfian access pattern (a few URLs take most of the traffic) so cache-friendly
-in the first place.
+## TTL jitter
 
-It's `volatile-lfu` rather than `allkeys-lfu` because the Bloom filter and
-`bloom:ready` must never be evicted. They have no TTL, while cached values and
-leases all do, so this policy can only choose among keys that are safe to lose.
+Every TTL is 5 minutes plus 0 to 10 random seconds. Keys cached together, say right after
+a restart, then don't all expire in the same second.
 
-`maxmemory` itself is left at Redis's default (`0`, unlimited) so normal
-runs and tests never evict anything unexpectedly. To actually reproduce the
-trigger: `redis-cli CONFIG SET maxmemory 5mb` against a running instance,
-then watch cold keys get evicted before hot ones under load.
+The base TTL is the same as in Tiers 4.1 and 4.2. There it's the only fix for a stale
+set. Here writes invalidate and `IFEQ` refuses stale fills, so it only has to catch rare
+cases like a failed `DEL`. A wrong value can survive up to 310 seconds.
 
----
+## Eviction
 
-## A real lease against the thundering herd
+| Setting | Value | Why |
+|---|---|---|
+| `maxmemory` | `8mb` | Unlimited by default, so Redis would never evict. Small on purpose, to make eviction easy to watch. Size it to your hot set in production. |
+| `maxmemory-policy` | `volatile-lfu` | Evicts only keys with a TTL, least used first. URLs and notes have one. The filter and `bloom:ready` don't, so they're never evicted. |
 
-Before this quarter, `resolve`'s miss path had no coordination at all: every
-in-flight request that missed Redis at the same instant independently
-queried Postgres to rebuild the identical entry. `resolve` now does this on
-a miss:
-
-```text
-loop:
-    if the real key exists in Redis -> return it
-    try to acquire lease:{code}  (SET ... NX EX 5)
-    if acquired:
-        query Postgres, populate the real key (or release the lease on a
-        genuine miss), return
-    else:
-        sleep briefly, then loop back to the top
-```
-
-The critical property: a loser's next step after sleeping is to **try to
-acquire the lease itself again** — not just to poll the real key and give up
-after a timeout. If the current leader crashes before populating the cache,
-its lease simply expires on its own `EX` after 5 seconds, and the *very
-next* waiter's retry succeeds immediately and becomes the new leader. No
-request ever falls through to querying Postgres unguarded, and no request
-can be blocked forever by a leader that never comes back — the lease's TTL
-is what bounds that.
-
-That guarantee only holds while Redis works. If taking the lease fails, the request
-reads Postgres directly and doesn't write the value back: without a lease, a write
-could race an invalidation. `PATCH` and `DELETE` still return 500, because they
-can't invalidate.
-
-### The lease's release isn't fenced
-
-The success path's `redis.del(lease_key(code))` deletes whatever is currently at
-that key — it never checks that it's still *this* worker's lease. If a
-leader finishes unusually late, after its own lease already expired and a
-second worker re-acquired it, that late `DEL` deletes the second worker's
-still-active lease instead of its own. Harmless here specifically because
-the real cache key is always written before the lease is released, so
-anyone new checks the real key first and never reaches the lease at all —
-but a textbook-correct lease would use a unique per-holder token and a
-conditional delete (a fencing token) to close this gap outright rather than
-relying on that argument. See `QUESTIONS.md`.
-
-This is deliberately the first, simplest mitigation from the root README's
-list ("a distributed lock: `SET key val NX EX ttl`"), not the most
-sophisticated one (singleflight and a TTL keep-alive are still ahead in
-Tier 4.4). It's also the one that generalizes to trigger #3 above:
-`PATCH`'s plain `DEL` and a TTL lapsing look identical from `resolve`'s
-point of view — both are just "the key isn't there anymore" — so the same
-lease defends against both without knowing which one happened.
+Redis suggests `allkeys-lru` for a pure cache, with data that must stay on a separate
+instance ([eviction docs](https://redis.io/docs/latest/develop/reference/eviction/)).
+`volatile-lfu` keeps one instance for both.
 
 ---
 
 ## What breaks here
 
+As long as every Redis command succeeds, no order of reads and writes leaves the cache
+holding an old URL. `mixed_reads_and_writes_never_leave_a_stale_value` checks this over
+50 rounds; the same test fails against Tier 4.1. What's left comes from **lost
+invalidations**:
+
 | Problem | Status |
 |---|---|
-| Still one Postgres `nextval()` sequence and one Redis instance — both single points of failure, and the counter is a bottleneck once there's more than one app server. | Open problem |
-| While Redis is down, reads fall back to Postgres with no limit on the load, and writes return 500. | Open problem |
-| The lease only protects a single Redis instance's view of a key. Replicating Redis for availability would mean a lease acquired against a primary that hasn't yet propagated to a replica is a new race. | Open problem |
-
----
+| **A writer's `DEL` fails** after its commit: a Redis blip, or the app crashing in between. The old URL stays cached, and a rebuild in progress can cache it again, because its note was never removed. It lasts up to one TTL, 310 s. | Open problem: needs the invalidation tied to the commit, with an outbox table or by reading Postgres's log (CDC) |
+| **Writes during a Redis outage.** Their `DEL`s fail, and with `appendonly` the old values come back when Redis does. | Same as above |
+| A reader that fetched the value just before a write's `DEL` serves the old URL once. | Inherent to any cache |
+| A cached URL ignores `expires_at`, so an expired link can redirect for up to one TTL. No endpoint sets it yet. | Open problem |
+| If keys without a TTL fill memory, nothing is left to evict, and writes like `BF.INSERT` fail. | Accepted |
+| A rebuild slower than 200 ms lets waiters through to Postgres. | Accepted |
+| A deleted code queries Postgres on every request, because the filter can't forget it. | Open problem |
+| While Redis is down, the full read load lands on Postgres. | Open problem |
+| Race 1 needs replicas, which we don't have yet. | Not applicable |
 
 ## Discussion questions
 
-1. The lease loop's retry interval is a flat 50ms. What would happen with a
-   much longer interval? A much shorter one? Think in terms of: how quickly
-   the real leader typically finishes, versus how many wasted lease-
-   acquisition attempts pile up against Redis while everyone waits.
-2. `PATCH` and `DELETE` both invalidate with a plain `DEL`. Walk through what
-   would need to change if a `PATCH` under heavy concurrent read load should
-   *not* cause a visible stampede at all — i.e., the write-through
-   alternative this quarter deliberately didn't take.
-3. The lease key and the real cache key are separate Redis keys
-   (`lease:{code}` vs `{code}`). What would go wrong if they were the same
-   key — e.g., storing a sentinel value in `{code}` itself to mean "someone
-   is rebuilding this"?
-4. `resolve`'s loop has no maximum iteration count — it retries until the
-   key resolves, however long that takes. What's the argument for that being
-   correct, and what's the argument for it being an operational risk worth
-   bounding anyway?
-5. LFU counters decay over time in Redis (so a key that *was* hot but no
-   longer is eventually looks cold again). Why does that matter for a
-   caching workload, and what would happen under `allkeys-lru` instead if a
-   link goes viral for an hour and then is never touched again?
+1. Why does the note have to start with a byte no URL can contain? What happens if a
+   reader forgets the check?
+2. A waiter gives up after 200 ms but the note lives 2 seconds. What does each number
+   protect, and what goes wrong if you swap them?
+3. Memcached's `I` flag marks a value stale instead of deleting it, and one reader
+   refreshes it while the others keep serving the old URL. What would that take in Redis,
+   and does Tier 0's "stale is fine" make it worth it?
+4. With `volatile-lfu`, what happens to a key that's read once a minute versus one read
+   1,000 times in the last second?
 
-**Previous:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md) ·
-**Next:** [Tier 4.4 — Singleflight, TTL Keep-Alive, TTL Jitter](../tier-4.4-caching/README.md)
+**Previous:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md)

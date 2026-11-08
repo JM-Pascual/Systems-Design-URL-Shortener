@@ -1,5 +1,5 @@
-//! The cache-aside store: Redis in front of Tier 3's Postgres `links` table.
-//! The miss path has no coordination yet, on purpose: see this tier's README.
+//! The cache-aside store: Redis in front of Tier 3's Postgres `links` table. See
+//! this tier's README, including for the races it leaves open on purpose.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -9,14 +9,13 @@ use sqlx::PgPool;
 
 use crate::base62;
 
-/// How long a cached mapping lives. Arbitrary for a teaching build; a real
-/// deployment would tune it against how often links change.
+/// How long a cached mapping lives, which is also the longest a wrong value can
+/// survive. Shorter means less staleness and more Postgres queries. 5 minutes is
+/// the value AWS uses in its lazy-loading example. Every tier uses the same one.
 const CACHE_TTL_SECONDS: u64 = 300;
 
-/// shortcut: logs every failed request, so an outage is noisy. The gate tier's
-/// breaker can replace this with a single state change.
 fn log_redis_error(e: impl std::fmt::Display) {
-    eprintln!("redis failed, using Postgres: {e:#}");
+    eprintln!("redis failed: {e:#}");
 }
 
 pub struct Store {
@@ -27,9 +26,9 @@ pub struct Store {
     /// How many times `resolve` has queried Postgres, for `/metrics`. This is
     /// the exact thing a stampede spikes.
     postgres_queries: AtomicU64,
-    /// From `DEMO_QUERY_DELAY_MS`: a real local query is too fast for a demo's
-    /// concurrent requests to land inside the miss window, so
-    /// `../thundering-herd-demo/` simulates a slow one.
+    /// From `DEMO_QUERY_DELAY_MS`: a real local read is too fast for concurrent
+    /// requests to land between its `SELECT` and `SET`, so this widens that gap
+    /// for `../thundering-herd-demo/` and the stale-set test.
     demo_query_delay: Duration,
 }
 
@@ -64,16 +63,13 @@ impl Store {
         self.postgres_queries.load(Ordering::Relaxed)
     }
 
-    /// Store a long URL and return the freshly minted short code.
-    ///
-    /// Postgres goes first: a cached value whose `INSERT` then fails would
-    /// resolve a link Postgres never had.
+    /// Store a long URL and return the freshly minted short code. It reaches the
+    /// cache on its first read.
     pub async fn shorten(&self, url: String) -> anyhow::Result<String> {
         let id: i64 = sqlx::query_scalar("SELECT nextval('link_ids')")
             .fetch_one(&self.pool)
             .await?;
         let code = base62::encode(id as u64);
-        let mut redis = self.redis.clone();
 
         sqlx::query("INSERT INTO links (code, long_url) VALUES ($1, $2)")
             .bind(&code)
@@ -81,44 +77,62 @@ impl Store {
             .execute(&self.pool)
             .await?;
 
-        redis
-            .set_ex::<_, _, ()>(&code, &url, CACHE_TTL_SECONDS)
-            .await?;
-
         Ok(code)
     }
 
-    /// Look up the long URL for a code: Redis first, then Postgres on a miss.
-    pub async fn resolve(&self, code: &str) -> anyhow::Result<Option<String>> {
-        match self.redis.clone().get::<_, Option<String>>(code).await {
-            Ok(Some(url)) => return Ok(Some(url)),
-            Ok(None) => {}
-            Err(e) => {
-                log_redis_error(e);
-                return self.read_postgres(code).await;
-            }
-        }
-
-        self.rebuild(code).await
+    /// Change a code's destination. `false` means no such code.
+    pub async fn update(&self, code: &str, url: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("UPDATE links SET long_url = $2 WHERE code = $1")
+            .bind(code)
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
+        self.invalidate(code).await;
+        Ok(result.rows_affected() > 0)
     }
 
-    /// Read Postgres without touching the cache. Used alone when Redis has failed:
-    /// with no working lease to guard it, this path must not write a value back.
-    async fn read_postgres(&self, code: &str) -> anyhow::Result<Option<String>> {
-        self.postgres_queries.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(self.demo_query_delay).await;
+    /// Remove a code entirely. `false` means no such code.
+    pub async fn delete(&self, code: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM links WHERE code = $1")
+            .bind(code)
+            .execute(&self.pool)
+            .await?;
+        self.invalidate(code).await;
+        Ok(result.rows_affected() > 0)
+    }
 
-        Ok(sqlx::query_scalar(
+    /// Runs after the database write has committed, so failing here can't undo
+    /// it. The value stays stale until its TTL runs out.
+    async fn invalidate(&self, code: &str) {
+        if let Err(e) = self.redis.clone().del::<_, ()>(code).await {
+            log_redis_error(e);
+        }
+    }
+
+    /// Look up the long URL for a code. If Redis fails, that counts as a miss,
+    /// because Postgres can still answer.
+    pub async fn resolve(&self, code: &str) -> anyhow::Result<Option<String>> {
+        let cached = self
+            .redis
+            .clone()
+            .get::<_, Option<String>>(code)
+            .await
+            .unwrap_or_else(|e| {
+                log_redis_error(e);
+                None
+            });
+        if cached.is_some() {
+            return Ok(cached);
+        }
+
+        self.postgres_queries.fetch_add(1, Ordering::Relaxed);
+        let url: Option<String> = sqlx::query_scalar(
             "SELECT long_url FROM links WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(code)
         .fetch_optional(&self.pool)
-        .await?)
-    }
-
-    /// Query Postgres and, on a hit, populate the cache.
-    async fn rebuild(&self, code: &str) -> anyhow::Result<Option<String>> {
-        let url = self.read_postgres(code).await?;
+        .await?;
+        tokio::time::sleep(self.demo_query_delay).await;
 
         if let Some(url) = &url
             && let Err(e) = self
@@ -145,19 +159,24 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
-    /// These tests need real Postgres and Redis reachable at `DATABASE_URL`
-    /// / `REDIS_URL` (see `../docker-compose.yml`) and are marked `#[ignore]`
-    /// so `cargo test` stays usable without either. Run them explicitly:
-    /// `cargo test -p tier-4-1-caching -- --ignored`
+    /// These tests need the services in `../docker-compose.yml` and are marked
+    /// `#[ignore]` so `cargo test` stays usable without them. Run them with:
+    /// `cargo test -p tier-4-1-caching -- --ignored --test-threads=1`
     async fn test_store() -> Store {
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://shortener:shortener@localhost:5434/shortener".into());
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6380".into());
-        Store::connect(&database_url, &redis_url)
+        let config = Config::from_env();
+        Store::connect(&config.database_url, &config.redis_url)
             .await
-            .expect("connect to test database/redis")
+            .expect("connect to test services")
+    }
+
+    async fn admin_redis() -> redis::aio::MultiplexedConnection {
+        redis::Client::open(Config::from_env().redis_url)
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -171,40 +190,72 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn resolves_what_it_stored() {
-        let store = test_store().await;
-        let code = store
-            .shorten("https://example.com/long/path".into())
-            .await
-            .unwrap();
-        assert_eq!(
-            store.resolve(&code).await.unwrap(),
-            Some("https://example.com/long/path".to_string())
-        );
-    }
-
-    #[tokio::test]
-    #[ignore]
     async fn unknown_code_resolves_to_none() {
         let store = test_store().await;
-        assert_eq!(store.resolve("does-not-exist").await.unwrap(), None);
+        assert_eq!(store.resolve("doesNotExist").await.unwrap(), None);
     }
 
-    /// The property this tier adds: `shorten` writes through, so the first
-    /// `resolve` is a cache hit and never queries Postgres.
+    /// The whole point of the tier: only the first read reaches Postgres, and
+    /// it caches the value with a TTL.
     #[tokio::test]
     #[ignore]
-    async fn resolve_hits_cache_without_a_prior_miss() {
+    async fn the_first_read_fills_the_cache() {
         let store = test_store().await;
-        let code = store
-            .shorten("https://cached.example".into())
-            .await
-            .unwrap();
+        let code = store.shorten("https://a.example".into()).await.unwrap();
+
+        for _ in 0..3 {
+            assert_eq!(
+                store.resolve(&code).await.unwrap().as_deref(),
+                Some("https://a.example")
+            );
+        }
+
+        assert_eq!(store.postgres_query_count(), 1);
+        let ttl: i64 = admin_redis().await.ttl(&code).await.unwrap();
+        assert!(ttl > 0 && ttl <= CACHE_TTL_SECONDS as i64, "ttl was {ttl}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn writes_invalidate_the_cache() {
+        let store = test_store().await;
+        let code = store.shorten("https://old.example".into()).await.unwrap();
+        store.resolve(&code).await.unwrap();
+
+        assert!(store.update(&code, "https://new.example").await.unwrap());
         assert_eq!(
-            store.resolve(&code).await.unwrap(),
-            Some("https://cached.example".to_string())
+            store.resolve(&code).await.unwrap().as_deref(),
+            Some("https://new.example")
         );
-        assert_eq!(store.postgres_query_count(), 0);
+
+        assert!(store.delete(&code).await.unwrap());
+        assert_eq!(store.resolve(&code).await.unwrap(), None);
+        assert!(!store.delete(&code).await.unwrap());
+    }
+
+    /// Race 2 in `docs/race-conditions.md`, left open on purpose: a read that
+    /// started before a write caches the old value after the write's `DEL`. Only
+    /// the TTL fixes it.
+    #[tokio::test]
+    #[ignore]
+    async fn a_slow_read_can_cache_a_stale_value() {
+        let mut store = test_store().await;
+        store.demo_query_delay = Duration::from_millis(300);
+        let code = store.shorten("https://old.example".into()).await.unwrap();
+
+        let (read, _) = tokio::join!(store.resolve(&code), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            store.update(&code, "https://new.example").await.unwrap()
+        });
+        assert_eq!(read.unwrap().as_deref(), Some("https://old.example"));
+
+        assert_eq!(
+            store.resolve(&code).await.unwrap().as_deref(),
+            Some("https://old.example"),
+            "Postgres has the new URL, but the cache kept the old one"
+        );
+        let ttl: i64 = admin_redis().await.ttl(&code).await.unwrap();
+        assert!(ttl > 0 && ttl <= CACHE_TTL_SECONDS as i64, "ttl was {ttl}");
     }
 
     /// A dropped connection must heal by itself: restarting Redis shouldn't
@@ -214,50 +265,34 @@ mod tests {
     async fn recovers_after_the_connection_drops() {
         let store = test_store().await;
         let code = store.shorten("https://back.example".into()).await.unwrap();
+        store.resolve(&code).await.unwrap();
 
-        let redis_url = crate::config::Config::from_env().redis_url;
-        let mut admin = redis::Client::open(redis_url)
-            .unwrap()
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
         let killed: i64 = redis::cmd("CLIENT")
             .arg("KILL")
             .arg("TYPE")
             .arg("normal")
             .arg("SKIPME")
             .arg("yes")
-            .query_async(&mut admin)
+            .query_async(&mut admin_redis().await)
             .await
             .unwrap();
         assert!(killed > 0);
 
-        let mut resolved = None;
-        for _ in 0..50 {
-            if let Ok(url) = store.resolve(&code).await {
-                resolved = url;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(resolved.as_deref(), Some("https://back.example"));
+        store.resolve(&code).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _: () = store.redis.clone().del(&code).await.unwrap();
     }
 
-    /// A failing cache must cost speed, not availability. Covers a failed `GET` and a failed `SET`.
+    /// A failing cache must cost speed, not availability. Revoking commands from
+    /// the app's user makes them fail on demand; `admin` keeps the power to
+    /// restore them.
     #[tokio::test]
     #[ignore]
-    async fn reads_survive_redis_failures() {
+    async fn reads_and_writes_survive_redis_failures() {
         let store = test_store().await;
         let code = store.shorten("https://db.example".into()).await.unwrap();
 
-        // Revoking commands from the app's user makes them fail on demand. This
-        // separate user keeps the power to delete the key and restore them.
-        let redis_url = crate::config::Config::from_env().redis_url;
-        let mut admin = redis::Client::open(redis_url)
-            .unwrap()
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
+        let mut admin = admin_redis().await;
         let _: () = redis::cmd("ACL")
             .arg("SETUSER")
             .arg("admin")
@@ -274,33 +309,30 @@ mod tests {
             .query_async(&mut admin)
             .await
             .unwrap();
-
-        let acl = {
-            let admin = admin.clone();
-            move |rule: &'static str| {
-                let mut admin = admin.clone();
-                async move {
-                    let _: () = redis::cmd("ACL")
-                        .arg("SETUSER")
-                        .arg("default")
-                        .arg(rule)
-                        .query_async(&mut admin)
-                        .await
-                        .unwrap();
-                }
+        let acl = |rule: &'static str| {
+            let mut admin = admin.clone();
+            async move {
+                let _: () = redis::cmd("ACL")
+                    .arg("SETUSER")
+                    .arg("default")
+                    .arg(rule)
+                    .query_async(&mut admin)
+                    .await
+                    .unwrap();
             }
         };
 
         for (revoke, restore) in [("-@all", "+@all"), ("-set", "+set")] {
-            let _: () = admin.del(&code).await.unwrap();
             acl(revoke).await;
             let resolved = store.resolve(&code).await;
+            let updated = store.update(&code, "https://db.example").await;
             acl(restore).await;
             assert_eq!(
                 resolved.unwrap().as_deref(),
                 Some("https://db.example"),
                 "with {revoke}"
             );
+            assert!(updated.unwrap(), "with {revoke}");
         }
     }
 }

@@ -2193,19 +2193,6 @@ dependencies = [
  "anyhow",
  "axum",
  "object_store",
- "redis",
- "serde",
- "sqlx",
- "tokio",
-]
-
-[[package]]
-name = "tier-4-4-caching"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "object_store",
  "rand 0.8.8",
  "redis",
  "serde",

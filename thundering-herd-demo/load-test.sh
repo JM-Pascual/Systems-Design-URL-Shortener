@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fires repeated concurrent bursts at the same code on two running app
-# instances -- tier-4.1-caching (no lease) and tier-4.3-caching (with a
-# lease) -- after clearing that code's cache entry each time, to simulate a
+# instances -- tier-4.1-caching (no coordination) and tier-4.3-caching (a
+# note in the key) -- after clearing that code's cache entry each time, to simulate a
 # TTL lapsing under sustained load. Watch the Grafana dashboard at
 # http://localhost:3001 while this runs.
 #
