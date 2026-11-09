@@ -21,6 +21,7 @@ members = [
     "tier-4.1-caching",
     "tier-4.2-caching",
     "tier-4.3-caching",
+    "tier-4.4-caching",
 ]
 
 # Dependency versions are declared once here and inherited by member crates
@@ -34,6 +35,8 @@ redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }
 anyhow = "1"
 rand = "0.8"
 object_store = { version = "0.14", features = ["aws"] }
+pgwire-replication = { version = "0.5", default-features = false, features = ["scram"] }
+url = "2"
 
 [workspace.package]
 edition = "2024"

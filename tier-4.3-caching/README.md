@@ -32,10 +32,19 @@ This is how the reference designs do it:
 | **Note in the key, `SET IFEQ`** (this tier) | In the cached key | Yes | Redis 8.4. Every reader must check for the prefix. |
 | Facebook's leases ([paper](https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf), §3.2.1) | Server-side token per key | Yes | Needs a modified memcached. |
 | Memcached meta commands (`N`, `W`, `Z` flags, [docs](https://docs.memcached.org/protocols/meta/)) | Empty placeholder item in the key | Yes, with CAS | Memcached, not Redis. |
+| [IdentityCache](https://github.com/Shopify/identity_cache) (Shopify) | `[FILL_LOCKED, client_id, version]` in the key | Yes, with CAS | Memcached. Deletes also write a short-lived `DELETED` marker into the key. The closest production match to this tier. |
 | [rueidisaside](https://github.com/redis/rueidis/tree/main/rueidisaside) | `rueidisid:` placeholder in the key | Yes | Lua scripts, written before `IFEQ` existed. This tier is the same design without them. |
 | [rockscache](https://github.com/dtm-labs/rockscache) | Hash fields `lockOwner`, `lockUntil` beside `value` | Yes, and serves stale while rebuilding | Lua for every operation. |
-| Separate `lock:{code}` key | A second key | **No**: a `DEL` of the value doesn't stop the rebuild | Two keys that can drift apart, and need a hash tag to share a Redis Cluster node. |
+| Separate `lock:{code}` key, as in Redis's [cache-aside guide](https://redis.io/docs/latest/develop/use-cases/cache-aside/rust/) | A second key | **No**: a `DEL` of the value doesn't stop the rebuild | Two keys that can drift apart, and need a hash tag to share a Redis Cluster node. |
 | In-process singleflight | App memory | No | Only coalesces within one process. |
+
+So the idea is established: production caches keep the marker in the key, while most
+tutorials, Redis's own included, teach a separate lock that stops stampedes but not stale
+sets. What's new here is building it on `SET IFEQ`, which only arrived in Redis 8.4. We
+didn't find a published library that uses it for cache fills yet.
+
+IdentityCache's README also lists lost invalidations and cache flushes as known causes of
+stale data, the same limit described under "What breaks here".
 
 ## Every Redis call
 
@@ -85,8 +94,8 @@ invalidations**:
 
 | Problem | Status |
 |---|---|
-| **A writer's `DEL` fails** after its commit: a Redis blip, or the app crashing in between. The old URL stays cached, and a rebuild in progress can cache it again, because its note was never removed. It lasts up to one TTL, 310 s. | Open problem: needs the invalidation tied to the commit, with an outbox table or by reading Postgres's log (CDC) |
-| **Writes during a Redis outage.** Their `DEL`s fail, and with `appendonly` the old values come back when Redis does. | Same as above |
+| **A writer's `DEL` fails** after its commit: a Redis blip, or the app crashing in between. The old URL stays cached, and a rebuild in progress can cache it again, because its note was never removed. It lasts up to one TTL, 310 s. | Fixed in Tier 4.4 |
+| **Writes during a Redis outage.** Their `DEL`s fail, and with `appendonly` the old values come back when Redis does. | Fixed in Tier 4.4 |
 | A reader that fetched the value just before a write's `DEL` serves the old URL once. | Inherent to any cache |
 | A cached URL ignores `expires_at`, so an expired link can redirect for up to one TTL. No endpoint sets it yet. | Open problem |
 | If keys without a TTL fill memory, nothing is left to evict, and writes like `BF.INSERT` fail. | Accepted |
@@ -107,4 +116,5 @@ invalidations**:
 4. With `volatile-lfu`, what happens to a key that's read once a minute versus one read
    1,000 times in the last second?
 
-**Previous:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md)
+**Previous:** [Tier 4.2 — Bloom Filter for the Negative Case](../tier-4.2-caching/README.md) ·
+**Next:** [Tier 4.4 — Invalidations from the WAL](../tier-4.4-caching/README.md)
