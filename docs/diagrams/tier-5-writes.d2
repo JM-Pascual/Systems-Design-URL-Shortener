@@ -1,0 +1,41 @@
+# Sequence: how a new link and an edit reach a read region. Writes go to the primary;
+# each region's Redis changes only once its own replica has the change.
+...@_style
+...@_icons
+
+title: Tier 5 - The write flow {class: title}
+
+flow: "" {
+  shape: sequence_diagram
+  client: Client {class: svc}
+  app: "App, nearest region" {class: [svc; rust]}
+  primary: "Postgres primary, write region" {class: [svc; postgres]}
+  replica: "Local replica" {class: [svc; postgres]}
+  sync: "Local cache sync" {class: [svc; critical]}
+  redis: "Local Redis" {class: [svc; redis]}
+
+  create: "POST /shorten" {
+    client -> app: long URL
+    app -> primary: "INSERT, returns commit LSN" {class: critical-path}
+    primary -> replica: "streams WAL" {class: async}
+    app -> replica: "waits until replayed" {class: critical-path}
+    app -> redis: "BF.INSERT code"
+    app -> client: short link
+  }
+
+  edit: "PATCH or DELETE /{code}" {
+    client -> app: request
+    app -> primary: "UPDATE or DELETE" {class: critical-path}
+    app -> client: "done, no DEL"
+    primary -> replica: "streams WAL" {class: async}
+    replica -> sync: "change, from its slot" {class: async}
+    sync -> redis: "DEL code, retried" {class: [async; critical-path]}
+    sync -> replica: "confirms the position" {class: async}
+  }
+
+  others: "Then in every read region, on its own" {
+    primary -> replica: "streams WAL" {class: async}
+    replica -> sync: "INSERT, UPDATE, DELETE" {class: async}
+    sync -> redis: "BF.INSERT or DEL" {class: async}
+  }
+}

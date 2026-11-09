@@ -1,0 +1,42 @@
+# Containers: what runs inside one read region. Reads stay local; writes cross to the
+# primary; the region's Redis follows its own replica, never the primary.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 5 - Inside a read region {class: title}
+
+client: Client {class: actor}
+
+region: Read region {
+  class: boundary
+  handlers: App handlers {class: [svc; rust]}
+  sync: "Cache sync, a task in the app" {class: [svc; critical]}
+  replica: Postgres replica {class: [store; postgres]}
+  redis: Redis {
+    class: boundary
+    cache: URL cache {class: [store; redis]}
+    filter: Bloom filter {class: [store; redis]}
+  }
+}
+
+primary: "Postgres primary, write region" {class: [external; postgres]}
+bucket: Filter snapshots {class: [store; aws-s3]}
+
+client -> region.handlers: "GET, POST, PATCH, DELETE"
+region.handlers -> region.redis: "GET, BF.EXISTS" {class: critical-path}
+region.handlers -> region.replica: "SELECT on a miss" {class: critical-path}
+region.handlers -> primary: "writes, cross-region"
+primary -> region.replica: "streams WAL" {class: async}
+region.replica -> region.sync: "changes, from its slot" {class: async}
+region.sync -> region.redis: "DEL, BF.INSERT" {class: async}
+bucket -> region.redis.filter: "restored on startup" {class: async}
+
+legend: "" {
+  class: legend
+  c: Component {class: [svc; legend-item]}
+  s: Datastore {class: [store; legend-item]}
+  e: External {class: [external; legend-item]}
+  k: Focus {class: [critical; legend-item]}
+  edges: "──  sync     - - -  async     ━━  critical path" {class: legend-text}
+}
