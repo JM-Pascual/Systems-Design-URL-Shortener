@@ -1,0 +1,32 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "space grotesk",
+        "createdAt": "2026-11-09T22:28:16.932Z",
+        "reason": "user picked the Blueprint slide template, which uses Space Grotesk"
+      },
+      {
+        "rule": "kicker-above-heading",
+        "value": "*",
+        "files": [
+          "docs/slides/index.html"
+        ],
+        "createdAt": "2026-11-09T22:28:16.945Z",
+        "reason": "user picked the Blueprint template: the mono row is its running slide header (section and slide number), not a kicker"
+      },
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "docs/slides/index.html"
+        ],
+        "createdAt": "2026-11-09T22:28:27.179Z",
+        "reason": "user picked the Blueprint template, whose look is grid paper"
+      }
+    ]
+  }
+}

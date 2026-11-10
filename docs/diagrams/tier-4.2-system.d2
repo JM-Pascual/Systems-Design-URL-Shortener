@@ -1,0 +1,32 @@
+# Components: the Bloom filter in Redis, and the job inside the app that keeps it complete. The README keeps the sequence view.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 4.2 - A filter that is safe to trust {class: title}
+
+client: Client {class: actor}
+
+app: App process {
+  class: boundary
+  job: Bloom job {class: [svc; critical]}
+  handlers: HTTP handlers {class: [svc; rust]}
+}
+
+redis: Redis {
+  class: boundary
+  filter: Bloom filter {class: [store; redis; critical]}
+  cache: cached URLs {class: [store; redis]}
+}
+
+postgres: "Postgres: links, bloom_snapshots" {class: [store; postgres]}
+bucket: Snapshot bucket {class: [store; aws-s3]}
+
+
+client -> app.handlers: "shorten, redirect"
+bucket -> app.job: snapshot chunks {class: async}
+app.job -> redis.filter: "adds codes, reloads" {class: async}
+postgres -> app.job: "new codes, snapshots" {class: async}
+app.handlers -> redis.filter: "BF.EXISTS, BF.INSERT" {class: critical-path}
+app.handlers -> redis.cache: "GET, SET, DEL"
+app.handlers -> postgres: "SELECT, INSERT"

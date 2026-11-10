@@ -31,12 +31,3 @@ primary -> region.replica: "streams WAL" {class: async}
 region.replica -> region.sync: "changes, from its slot" {class: async}
 region.sync -> region.redis: "DEL, BF.INSERT" {class: async}
 bucket -> region.redis.filter: "restored on startup" {class: async}
-
-legend: "" {
-  class: legend
-  c: Component {class: [svc; legend-item]}
-  s: Datastore {class: [store; legend-item]}
-  e: External {class: [external; legend-item]}
-  k: Focus {class: [critical; legend-item]}
-  edges: "──  sync     - - -  async     ━━  critical path" {class: legend-text}
-}

@@ -35,11 +35,3 @@ reads -> write.primary: "INSERT, UPDATE, DELETE" {class: critical-path}
 write.primary -> reads: "streams WAL" {class: async}
 write.snapshots -> bucket: "uploads daily"
 bucket -> reads: "restores filters" {class: async}
-
-legend: "" {
-  class: legend
-  c: Component {class: [svc; legend-item]}
-  s: Datastore {class: [store; legend-item]}
-  k: Focus {class: [critical; legend-item]}
-  edges: "──  sync     - - -  async     ━━  critical path" {class: legend-text}
-}
