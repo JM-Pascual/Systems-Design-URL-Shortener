@@ -32,6 +32,7 @@ The hard part is the load those two operations run under:
 | [4.2: Bloom filter](tier-4.2-caching/) | A filter of every code, kept complete by a background job, with snapshots in a bucket | The races from 4.1 are still open |
 | [4.3: A note in the key](tier-4.3-caching/) | One rebuilder per key with `SET NX` and `SET IFEQ`, TTL jitter, and `volatile-lfu` eviction | A lost `DEL` leaves an old URL cached for up to one TTL |
 | [4.4: Invalidations from the WAL](tier-4.4-caching/) | A worker reads Postgres's write-ahead log and sends a second `DEL`, retried until Redis accepts | A broken worker goes unnoticed without monitoring, and Postgres is still a single instance |
+| [5: Read regions](tier-5-read-regions/) | Design only: one write region and five read regions, each with a replica, Redis and cache sync reading its own replica's WAL | One writer, and changes reach other regions with a short delay |
 
 The [thundering herd demo](thundering-herd-demo/) compares 4.1 and 4.3 live in
 Grafana. [QUESTIONS.md](QUESTIONS.md) collects open discussion questions.

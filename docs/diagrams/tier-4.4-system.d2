@@ -1,0 +1,34 @@
+# Components: a second DEL comes from Postgres's WAL, through a slot, to a task in the app. The README keeps the sequence view.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 4.4 - Invalidations from the WAL {class: title}
+
+client: Client {class: actor}
+psql: Manual psql edit {class: actor}
+
+app: App process {
+  class: boundary
+  handlers: HTTP handlers {class: [svc; rust]}
+  invalidator: Invalidator task {class: [svc; critical]}
+}
+
+postgres: Postgres {
+  class: boundary
+  links: links table {class: [store; postgres]}
+  slot: replication slot {class: queue}
+}
+
+redis: Redis {
+  class: boundary
+  key: code key {class: [store; redis]}
+}
+
+client -> app.handlers: "shorten, redirect, edit"
+app.handlers -> postgres.links: "SELECT, UPDATE"
+app.handlers -> redis.key: "GET, SET, DEL once"
+psql -> postgres.links: UPDATE
+postgres.links -> postgres.slot: commits via WAL {class: async}
+postgres.slot -> app.invalidator: streams changes {class: async}
+app.invalidator -> redis.key: "DEL, retried" {class: [async; critical-path]}

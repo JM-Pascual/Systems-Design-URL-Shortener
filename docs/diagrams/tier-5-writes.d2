@@ -1,0 +1,31 @@
+# Data flow: how a write reaches the primary and comes back to the client's region.
+# A box diagram, not a sequence: D2 can't box several sequence participants, so the
+# numbers carry the order. Steps 4 and 5 run only for new links.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 5 - The write flow {class: title}
+
+client: Client {class: actor}
+
+local: "Client's region" {
+  class: boundary
+  app: App handlers {class: [svc; rust]}
+  replica: Postgres replica {class: [store; postgres]}
+  sync: Cache sync {class: [svc; critical]}
+  redis: Redis {class: [store; redis]}
+}
+
+write: Write region {
+  class: boundary
+  primary: Postgres primary {class: [store; postgres]}
+}
+
+client -> local.app: "1. POST, PATCH, DELETE"
+local.app -> write.primary: "2. writes, cross-region" {class: critical-path}
+write.primary -> local.replica: "3. streams WAL" {class: async}
+local.app -> local.replica: "4. new links: await replay" {class: critical-path}
+local.app -> local.redis: "5. new links: BF.INSERT"
+local.replica -> local.sync: "6. change, from its slot" {class: async}
+local.sync -> local.redis: "7. DEL or BF.INSERT" {class: async}

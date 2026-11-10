@@ -60,6 +60,7 @@ rejected. Limiting how often tokens are issued for a key also handles thundering
 | Race | Status | Why |
 |---|---|---|
 | Race 1 | **Not covered, and can't occur today** | There's one Postgres and one Redis, with no replicas or regions. It would appear as soon as reads went to a lagging replica. |
+| Race 1 | **Designed, Tier 5** | Each region's cache sync reads its own replica's WAL, so its `DEL` lands only after the replica has the new value. No code yet. |
 | Race 2 | **Open on purpose, Tiers 4.1 and 4.2** | They have no coordination, and `a_slow_read_can_cache_a_stale_value` reproduces it. The 5-minute TTL bounds the damage. |
 | Race 2 | **Covered, Tier 4.3** | `C_1` leaves a note in `k` before its `SELECT`. `C_2`'s `DEL` removes it, so `C_1`'s `SET ... IFEQ` is refused. `a_slow_read_cannot_cache_a_stale_value` checks it. |
 

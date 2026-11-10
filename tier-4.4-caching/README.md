@@ -74,7 +74,7 @@ protocol. Decoding the two message types we need takes about 20 lines in
 | A cached URL ignores `expires_at`. | Open problem, as in Tier 4.3 |
 | While Redis is down, the full read load lands on Postgres. | Open problem |
 | The invalidator assumes `code` is the first column of `links`. | Accepted: a `shortcut:` comment in the code |
-| Race 1 needs replicas, which we don't have yet. With them, each region would run its own invalidator from its own replica, as `mcsqueal` did. | Not applicable |
+| Race 1 needs replicas, which we don't have yet. With them, each region would run its own invalidator from its own replica, as `mcsqueal` did. | Designed in Tier 5 |
 
 ## Discussion questions
 
@@ -85,4 +85,5 @@ protocol. Decoding the two message types we need takes about 20 lines in
 3. Why doesn't `shorten` move its Bloom filter add to the invalidator too?
 4. What would change if the invalidator wrote the new URL with `SET` instead of `DEL`?
 
-**Previous:** [Tier 4.3 — A Note in the Key](../tier-4.3-caching/README.md)
+**Previous:** [Tier 4.3 — A Note in the Key](../tier-4.3-caching/README.md) ·
+**Next:** [Tier 5 — Read Regions](../tier-5-read-regions/README.md)

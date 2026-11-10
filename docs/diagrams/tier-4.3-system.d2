@@ -1,0 +1,29 @@
+# Components: one key holds a note or the URL, so only one reader rebuilds it. The Bloom job from 4.2 still runs; it is left out to keep the focus. The README keeps the sequence view.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 4.3 - A note in the key {class: title}
+
+client: Client {class: actor}
+
+app: App process {
+  class: boundary
+  handlers: HTTP handlers {class: [svc; rust]}
+}
+
+redis: "Redis, volatile-lfu" {
+  class: boundary
+  key: "code key: note or URL" {class: [store; redis; critical]}
+  filter: Bloom filter {class: [store; redis]}
+}
+
+postgres: Postgres {
+  class: boundary
+  links: links table {class: [store; postgres]}
+}
+
+client -> app.handlers: "shorten, redirect, edit"
+app.handlers -> redis.key: "SET NX note, SET IFEQ, DEL" {class: critical-path}
+app.handlers -> redis.filter: BF.EXISTS
+app.handlers -> postgres.links: "SELECT on miss, writes"

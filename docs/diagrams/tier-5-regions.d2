@@ -1,0 +1,37 @@
+# Containers: one write region holds the only primary; five read regions each serve redirects locally.
+# Tier 5 is a design with no code yet, so nothing is marked inferred: every box is proposed.
+...@_style
+...@_icons
+direction: right
+
+title: Tier 5 - One write region, five read regions {class: title}
+
+clients: Clients {class: actor}
+
+reads: Read regions {
+  class: boundary
+  # A one-column grid keeps the regions in order.
+  grid-columns: 1
+  grid-gap: 24
+  # Grids don't leave room for the container label, so it sits above the box.
+  label.near: outside-top-center
+  r1: "Region 1: app, replica, Redis" {class: [svc; postgres]}
+  r2: "Region 2: app, replica, Redis" {class: [svc; postgres]}
+  r3: "Region 3: app, replica, Redis" {class: [svc; postgres]}
+  r4: "Region 4: app, replica, Redis" {class: [svc; postgres]}
+  r5: "Region 5: app, replica, Redis" {class: [svc; postgres]}
+}
+
+write: Write region {
+  class: boundary
+  primary: Postgres primary {class: [store; postgres; critical]}
+  snapshots: Bloom snapshot job {class: [svc; rust]}
+}
+
+bucket: Filter snapshots {class: [store; aws-s3]}
+
+clients -> reads: "redirects, nearest region"
+reads -> write.primary: "INSERT, UPDATE, DELETE" {class: critical-path}
+write.primary -> reads: "streams WAL" {class: async}
+write.snapshots -> bucket: "uploads daily"
+bucket -> reads: "restores filters" {class: async}
