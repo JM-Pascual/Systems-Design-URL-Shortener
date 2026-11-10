@@ -1,0 +1,75 @@
+# Local Postgres + Redis + MinIO for this tier. `docker compose up -d` inside
+# this folder; the app's defaults already point at all three.
+#
+# Host ports are offset from Tier 4.3's defaults (5436/6382 -> 5437/6383) so
+# every tier's stack can run side by side without a port clash.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shortener
+      POSTGRES_PASSWORD: shortener
+      POSTGRES_DB: shortener
+    # wal_level=logical: lets the invalidator read row changes from the write-ahead log.
+    # max_slot_wal_keep_size: if the invalidator stops for long, Postgres drops its slot
+    # instead of keeping WAL until the disk fills. Its DELs are then lost, and the TTL is
+    # the backstop again.
+    command: postgres -c wal_level=logical -c max_slot_wal_keep_size=1GB
+    ports:
+      - "5437:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortener -d shortener"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis:
+    # The Bloom filter's `BF.*` commands ship with Redis since version 8, and
+    # `SET ... IFEQ` and `DELEX` since 8.4.
+    image: redis:8.4
+    restart: unless-stopped
+    # appendonly: the Bloom filter lives in Redis, and rebuilding it after a plain
+    # restart would be wasted work.
+    # maxmemory: unlimited by default, so without it Redis never evicts. 8 MB is
+    # small on purpose, to make eviction easy to watch.
+    # volatile-lfu: evict only keys with a TTL, least used first. Cached URLs and
+    # notes have one; the filter and `bloom:ready` don't, so they stay.
+    command: redis-server --appendonly yes --maxmemory 8mb --maxmemory-policy volatile-lfu
+    ports:
+      - "6383:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  minio:
+    # MinIO stopped publishing its own images, so this is the community fork.
+    # The app only speaks S3, so any compatible server can replace it.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    restart: unless-stopped
+    entrypoint: sh
+    # A top-level directory is a bucket, so `mkdir` creates it on first start.
+    command: -c "mkdir -p /data/bloom-snapshots && exec minio server /data"
+    environment:
+      MINIO_ROOT_USER: shortener
+      MINIO_ROOT_PASSWORD: shortener-secret
+    ports:
+      - "9004:9000"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

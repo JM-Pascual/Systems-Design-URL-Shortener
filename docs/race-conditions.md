@@ -79,7 +79,8 @@ The fix is to tie the invalidation to the commit, so it's retried until it lands
   `mcsqueal` did with MySQL. Debezium is the common tool.
 
 Either way the `DEL` arrives at least once, possibly late, so staleness shrinks from one TTL
-to the delay of that pipeline.
+to the delay of that pipeline. [Tier 4.4](../tier-4.4-caching/README.md) uses CDC, and keeps
+the handler's `DEL` too for read-your-writes.
 
 ## Current techniques
 

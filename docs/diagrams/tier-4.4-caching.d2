@@ -1,0 +1,31 @@
+# Sequence: a write's DEL from the handler, and a second one from the WAL, retried until Redis accepts.
+...@_style
+...@_icons
+
+title: Tier 4.4 - Invalidations from the WAL {class: title}
+
+flow: "" {
+  shape: sequence_diagram
+  client: Client {class: svc}
+  app: App process {class: [svc; rust]}
+  postgres: Postgres {class: [svc; postgres]}
+  worker: "Invalidator task, in the app" {class: [svc; critical]}
+  redis: Redis {class: [svc; redis]}
+
+  write: "PATCH /{code}" {
+    client -> app: new URL
+    app -> postgres: "UPDATE, commits to the WAL"
+    app -> redis: "DEL code, once" {class: critical-path}
+  }
+
+  stream: "Moments later" {
+    postgres -> worker: "commit, from the slot" {class: async}
+    worker -> redis: "DEL code, retried until accepted" {class: [async; critical-path]}
+    worker -> postgres: "confirms the position" {class: async}
+  }
+
+  manual: "UPDATE in psql" {
+    postgres -> worker: "commit, from the slot" {class: async}
+    worker -> redis: DEL code {class: async}
+  }
+}
