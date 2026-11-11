@@ -215,16 +215,15 @@
     code        TEXT PRIMARY KEY,   -- ① el código corto
     long_url    TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at  TIMESTAMPTZ,        -- ② reservada
-    user_id     UUID                -- ② reservada
+    expires_at  TIMESTAMPTZ,
+    user_id     UUID
 );
 
--- ③ Reemplaza al contador del Nivel 1.
+-- ② Reemplaza al contador del Nivel 1.
 CREATE SEQUENCE link_ids;</code></pre>
     <div class="notes">
       <div><b>① El código es la clave</b><span>Ya es único, corto y nunca cambia, así que no hace falta otro id.</span></div>
-      <div><b>② Para más adelante</b><span>Vencimiento y cuentas. Es más barato reservarlas ahora que migrar una tabla llena.</span></div>
-      <div><b>③ Compartida por todas las instancias</b><span>Postgres entrega el siguiente número, así que varios servidores pueden generar códigos.</span></div>
+      <div><b>② Compartida por todas las instancias</b><span>Utilizamos sequence objects para generar códigos. Son tablas especiales de una sola fila que facilitan obtener valores sucesivos con funciones seguras para <span style="white-space:nowrap">multi-user</span>.</span></div>
     </div>
   </div>
 </section>
