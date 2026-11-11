@@ -864,7 +864,7 @@ while let Some(event) = changes.recv().await? {
     <tr><td>Thundering herd · estampida</td><td>Vencen una o varias claves populares y todos los pedidos consultan Postgres al mismo tiempo.</td><td class="ok">Cerrada en 4.3</td></tr>
     <tr><td>Carrera 2 · stale set</td><td>Una lectura lenta cachea la URL vieja después del <code>DEL</code> de una escritura, dentro de una región.</td><td class="ok">Cerrada en 4.3</td></tr>
     <tr><td>Invalidación perdida</td><td>El <code>DEL</code> nunca llega.</td><td class="ok">Cerrada en 4.4</td></tr>
-    <tr class="on"><td>Carrera 1 · entre regiones</td><td>El <code>DEL</code> llega antes de que una réplica atrasada tenga el valor nuevo, y un lector cachea el viejo.</td><td>Necesita réplicas: Nivel 5</td></tr>
+    <tr class="on"><td>Carrera 1 · entre regiones</td><td>El <code>DEL</code> llega antes de que una réplica atrasada tenga el valor nuevo, y un lector cachea el viejo.</td><td></td></tr>
   </table>
   <p class="src mt-auto"><a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf">Scaling Memcache at Facebook, NSDI 2013</a></p>
 </section>
