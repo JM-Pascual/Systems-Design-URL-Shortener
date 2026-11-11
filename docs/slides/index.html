@@ -857,32 +857,6 @@ while let Some(event) = changes.recv().await? {
 </section>
 
 <section class="slide">
-  <div class="top"><span>4.4 · Código · src/invalidator.rs · changed_code</span><span class="n"></span></div>
-  <h2>Leer un mensaje de pgoutput</h2>
-  <div class="code-row">
-<pre class="code" style="font-size:16px"><code class="language-rust">fn changed_code(message: &amp;[u8]) -&gt; Option&lt;String&gt; {
-    // ① Solo 'U' y 'D'. Los inserts se saltean.
-    if !matches!(message.first(), Some(b'U' | b'D')) {
-        return None;
-    }
-    // ② Saltear el id de tabla de 4 bytes y la marca de tupla.
-    let tuple = message.get(6..)?;
-    // ③ 't' marca una columna de texto: largo de 4 bytes y los bytes.
-    if tuple.get(2) != Some(&amp;b't') {
-        return None;
-    }
-    let len = u32::from_be_bytes(tuple.get(3..7)?.try_into().ok()?) as usize;
-    String::from_utf8(tuple.get(7..7 + len)?.to_vec()).ok()
-}</code></pre>
-    <div class="notes">
-      <div><b>① Por qué saltear inserts</b><span>Nada se cachea antes de la primera lectura de un link, así que un insert nunca necesita un <code>DEL</code>.</span></div>
-      <div><b>② La tupla</b><span><code>K</code> u <code>O</code> es la clave vieja, <code>N</code> la fila nueva. Las dos empiezan con <code>code</code>.</span></div>
-      <div><b>③ shortcut:</b><span>Asume que <code>code</code> es la primera columna. Hay que leer el mensaje Relation cuando se publiquen más tablas.</span></div>
-    </div>
-  </div>
-</section>
-
-<section class="slide">
   <div class="top"><span>4.4 · Teoría · carreras</span><span class="n"></span></div>
   <h2>RC's y problemas del paper de Facebook</h2>
   <table class="t">
