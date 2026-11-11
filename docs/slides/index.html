@@ -88,14 +88,14 @@
   <h2>Índice</h2>
   <table class="t tight">
     <tr><th>Nivel</th><th>Agrega</th><th>Qué se rompe después</th></tr>
-    <tr><td>1 · Ingenuo</td><td>Un <code>HashMap</code> y un contador</td><td>Un reinicio pierde todo</td></tr>
+    <tr><td>1 · Baseline</td><td>Un <code>HashMap</code> y un contador</td><td>Un reinicio pierde todo</td></tr>
     <tr><td>2 · Códigos</td><td>Contador vs. hash truncado</td><td>Los códigos secuenciales se pueden recorrer</td></tr>
     <tr><td>3 · Persistencia</td><td>Postgres</td><td>Cada redirección cuesta una consulta</td></tr>
     <tr><td>4.1 · Cache-aside</td><td>Redis, un TTL, <code>DEL</code> al escribir</td><td>Estampidas, valores viejos, códigos inexistentes</td></tr>
     <tr><td>4.2 · Filtro de Bloom</td><td>Un filtro con todos los códigos</td><td>Las carreras de 4.1</td></tr>
-    <tr><td>4.3 · Nota en la clave</td><td>Un solo reconstructor por clave</td><td>Un <code>DEL</code> perdido</td></tr>
+    <tr><td>4.3 · Sistema de leases</td><td>Un solo reconstructor por clave</td><td>Un <code>DEL</code> perdido</td></tr>
     <tr><td>4.4 · WAL</td><td>Un segundo <code>DEL</code> desde el log de Postgres</td><td>Un solo Postgres, lejos de casi todos</td></tr>
-    <tr><td>5 · Ejemplo real</td><td>ChatGPT: un primario y ~50 réplicas</td><td>Las escrituras, en un solo primario</td></tr>
+    <tr><td>5 · Ejemplo real</td><td>ChatGPT: un primario y ~50 réplicas</td><td></td></tr>
   </table>
 </section>
 
