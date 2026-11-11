@@ -95,7 +95,7 @@
     <tr><td>4.2 · Filtro de Bloom</td><td>Un filtro con todos los códigos</td><td>Las carreras de 4.1</td></tr>
     <tr><td>4.3 · Nota en la clave</td><td>Un solo reconstructor por clave</td><td>Un <code>DEL</code> perdido</td></tr>
     <tr><td>4.4 · WAL</td><td>Un segundo <code>DEL</code> desde el log de Postgres</td><td>Un solo Postgres, lejos de casi todos</td></tr>
-    <tr><td>5 · Regiones de lectura</td><td>Un escritor, cinco regiones de lectura</td><td>Un escritor, demoras cortas</td></tr>
+    <tr><td>5 · Ejemplo real</td><td>ChatGPT: un primario y ~50 réplicas</td><td>Las escrituras, en un solo primario</td></tr>
   </table>
 </section>
 
@@ -917,10 +917,10 @@ while let Some(event) = changes.recv().await? {
 <!-- ═══════════════════════ NIVEL 5 ═══════════════════════ -->
 
 <section class="slide title">
-  <div class="top"><span>Solución 5 · Distribuido · solo diseño</span><span class="n"></span></div>
+  <div class="top"><span>Nivel 5 · Ejemplo real · OpenAI</span><span class="n"></span></div>
   <div class="stack loose">
     <div class="num">5</div>
-    <h1>Regiones de lectura</h1>
+    <h1>Ejemplo real de workloads <span style="white-space:nowrap">read-heavy</span></h1>
   </div>
   <div class="strip" data-current="5"></div>
 </section>
@@ -934,120 +934,57 @@ while let Some(event) = changes.recv().await? {
     <div class="card"><span class="k">Conexiones</span><span class="big" style="font-size:40px">PgBouncer</span><span class="small">los picos de clientes no llegan a Postgres</span></div>
     <div class="card"><span class="k">Muchas escrituras</span><span class="big" style="font-size:40px">Cosmos DB</span><span class="small">lo nuevo que no necesita esas garantías, shardeado</span></div>
   </div>
-  <div class="card focus"><span class="k">La conclusión</span><span style="font-size:21px; line-height:1.4">Un solo escritor evita las escrituras distribuidas: transacciones y consistencia fuerte en las escrituras. Las lecturas escalan con réplicas que pueden estar un poco atrasadas.</span></div>
-  <div class="cols mt-auto" style="--n:2">
-    <div class="point"><b>Sus fallas son las nuestras</b><span>Una de sus fallas comunes son las tormentas de cache misses: la estampida de 4.3.</span></div>
-    <div class="point"><b>Su próximo límite</b><span>El primario envía el WAL a cada réplica, así que prueban replicación en cascada: réplicas que lo reenvían a otras.</span></div>
-  </div>
-  <p class="src"><a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres/">InfoQ: OpenAI Scales Single Primary PostgreSQL</a> · <a href="https://openai.com/index/scaling-postgresql/">openai.com/index/scaling-postgresql</a></p>
+  <div class="card focus"><span class="k">La conclusión</span><span style="font-size:21px; line-height:1.4">Un solo escritor evita las escrituras distribuidas</span><ul style="margin:0; padding-left:24px; font-size:20px; line-height:1.5; color:var(--soft)"><li>Consistencia fuerte en el primario</li><li>Consistencia eventual en las réplicas</li></ul><span style="font-size:20px; line-height:1.4">Las lecturas escalan agregando réplicas. El límite son las escrituras: se reducen, y lo write-heavy o shardeable va a otro sistema.</span></div>
+  <p class="src mt-auto"><a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres/">InfoQ: OpenAI Scales Single Primary PostgreSQL</a> · <a href="https://openai.com/index/scaling-postgresql/">openai.com/index/scaling-postgresql</a></p>
 </section>
 
 <section class="slide">
-  <div class="top"><span>5 · Solución propuesta</span><span class="n"></span></div>
-  <h2>Nuestra versión</h2>
-  <table class="t" style="font-size:22px">
-    <tr><th>OpenAI</th><th>Nosotros</th></tr>
-    <tr><td>1 primario</td><td>1 primario, en la región de escritura</td></tr>
-    <tr><td>~50 réplicas</td><td>5 regiones de lectura, cada una con app, réplica de Postgres y Redis</td></tr>
-    <tr><td>Caché adelante</td><td>Un Redis por región, al día con su propia réplica</td></tr>
-    <tr><td>Cosmos DB para muchas escrituras</td><td>No hace falta: ~40 escrituras/s entran en un primario</td></tr>
-  </table>
-  <p class="lead mt-auto">Las redirecciones se sirven en la región más cercana. Las escrituras viajan al primario, y Postgres las replica solo.</p>
-</section>
-
-<section class="slide diagram">
-  <div class="top"><span>5 · Diagrama · las regiones</span><span class="n"></span></div>
-  <figure><img src="../diagrams/tier-5-regions.svg" alt="Regiones del Nivel 5"></figure>
-  <div class="cap"><span>Un escritor, cinco regiones de lectura, y los snapshots que cada región restaura.</span><span class="src">tier-5-regions.svg</span></div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · El flujo de escritura, paso a paso</span><span class="n"></span></div>
-  <h2>Una escritura sale, y vuelve</h2>
-  <div class="cols grow" style="--n:2; gap:48px">
-    <div class="stack" style="gap:18px">
-      <div class="step point"><b>1 · El cliente escribe en su región</b><span><code>POST</code>, <code>PATCH</code> o <code>DELETE</code>, a la app más cercana.</span></div>
-      <div class="step point"><b>2 · La app escribe en el primario</b><span>Un viaje entre regiones, el único.</span></div>
-      <div class="step point"><b>3 · El primario transmite su WAL</b><span>Cada réplica lo reproduce. Lo hace Postgres, no nuestro código.</span></div>
-      <div class="step point"><b>4 · Los links nuevos esperan a la réplica local</b><span>Así el link funciona apenas se devuelve.</span></div>
-    </div>
-    <div class="stack" style="gap:18px">
-      <div class="step point"><b>5 · Links nuevos: BF.INSERT local</b><span>En el filtro de esta región, y después se devuelve el link corto.</span></div>
-      <div class="step point"><b>6 · Cache sync lee el cambio</b><span>Desde un slot en su propia réplica, después de que la réplica lo reprodujo.</span></div>
-      <div class="step point"><b>7 · DEL o BF.INSERT</b><span><code>DEL</code> para una edición o un borrado, <code>BF.INSERT</code> para un código nuevo. Reintenta hasta que Redis acepta.</span></div>
-      <div class="step point"><b>Las ediciones no mandan DEL desde el handler</b><span>La réplica todavía estaría atrasada. La regla: cada cambio llega a cada región poco después de su commit.</span></div>
-    </div>
-  </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · Pros y contras</span><span class="n"></span></div>
-  <div class="pc">
-    <div>
-      <div class="head"><i>+</i><span>Pros</span></div>
-      <div class="item"><b>Las redirecciones quedan locales</b><span>El 99% del tráfico nunca sale de su región.</span></div>
-      <div class="item"><b>La Carrera 1 está cerrada</b><span>Cache sync lee su propia réplica, así que un <code>DEL</code> no puede adelantarse a los datos.</span></div>
-      <div class="item"><b>Sin sharding</b><span>La misma app en cada región. 40 escrituras/s entran en un primario.</span></div>
-      <div class="item"><b>Los links nuevos funcionan al instante</b><span>En la región que los creó.</span></div>
-    </div>
-    <div>
-      <div class="head con"><i>−</i><span>Contras</span></div>
-      <div class="item"><b>Un solo escritor</b><span>Si el primario falla, todas las regiones pierden escrituras y siguen sirviendo lecturas.</span></div>
-      <div class="item"><b>Las ediciones llegan tarde</b><span>Normalmente en menos de un segundo, y sin read-your-writes para ediciones.</span></div>
-      <div class="item"><b>Las escrituras cruzan el mundo</b><span>Y <code>POST /shorten</code> espera a una réplica, con la pregunta del timeout abierta.</span></div>
-      <div class="item"><b>Más cosas que vigilar</b><span>El retraso del slot en cada región, y la carga de transmitir el WAL en el primario.</span></div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════ CIERRE ═══════════════════════ -->
-
-<section class="slide">
-  <div class="top"><span>Resumen</span><span class="n"></span></div>
-  <h2>De un HashMap a seis regiones</h2>
-  <table class="t tight">
-    <tr><th>Nivel</th><th>La idea</th><th>Arregló</th></tr>
-    <tr><td>1</td><td>Contador + base62 en un <code>HashMap</code></td><td>Un punto de partida que funciona</td></tr>
-    <tr><td>2</td><td>Contador vs. hash</td><td>Códigos que nunca chocan</td></tr>
-    <tr><td>3</td><td>Postgres</td><td>Los reinicios</td></tr>
-    <tr><td>4.1</td><td>Cache-aside, TTL, <code>DEL</code></td><td>Una consulta por redirección</td></tr>
-    <tr><td>4.2</td><td>Filtro de Bloom</td><td>Consultas por códigos inexistentes</td></tr>
-    <tr><td>4.3</td><td>Sistema de leases</td><td>Estampidas y stale sets</td></tr>
-    <tr><td>4.4</td><td>Invalidaciones desde el WAL</td><td>Los <code>DEL</code> perdidos</td></tr>
-    <tr class="on"><td>5</td><td>Regiones de lectura</td><td>La distancia, y la Carrera 1</td></tr>
-  </table>
-</section>
-
-<section class="slide">
-  <div class="top"><span>Lo que sigue</span><span class="n"></span></div>
-  <h2>Todavía abierto</h2>
-  <div class="cols grow" style="--n:2">
+  <div class="top"><span>5 · Ejemplo real · fallas</span><span class="n"></span></div>
+  <h2>Sus fallas, y qué hicieron</h2>
+  <div class="cols grow">
     <div class="stack loose">
-      <div class="point"><b>Más de un escritor</b><span>Un id de región en cada código dejaría que cada región genere los suyos. ¿Qué gana eso a 40 escrituras/s?</span></div>
-      <div class="point"><b>Failover</b><span>Un standby caliente para el primario, y failover slots desde Postgres 17.</span></div>
-      <div class="point"><b>Vencimiento</b><span>Una URL cacheada ignora <code>expires_at</code> hasta un TTL.</span></div>
+      <span class="label">Fallas comunes</span>
+      <div class="point"><b>Tormentas de cache misses</b><span>Muchos misses juntos golpean la base: la estampida de 4.3.</span></div>
+      <div class="point"><b>Joins de muchas tablas</b><span>Generados por ORMs, caros para la base.</span></div>
+      <div class="point"><b>Reintentos en cadena</b><span>Servicios enteros reintentando a la vez multiplican la carga.</span></div>
     </div>
     <div class="stack loose">
-      <div class="point"><b>Códigos borrados</b><span>El filtro no puede olvidarlos, así que cada uno sigue costando una consulta.</span></div>
-      <div class="point"><b>Redis caído</b><span>La réplica de la región recibe toda la carga de lecturas, sin límite.</span></div>
-      <div class="point"><b>Monitoreo</b><span>Alertar sobre el retraso del slot en cada región antes de que se llene un disco.</span></div>
+      <span class="label">Qué hicieron</span>
+      <div class="point"><b>Cómputo a la aplicación</b><span>Parte del trabajo sale de la base.</span></div>
+      <div class="point"><b>Timeouts más estrictos</b><span>Para transacciones inactivas y largas.</span></div>
+      <div class="point"><b>Consultas reescritas</b><span>Para no interferir con autovacuum.</span></div>
     </div>
   </div>
+  <p class="src">Fuente: <a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres/">InfoQ: OpenAI Scales Single Primary PostgreSQL</a></p>
 </section>
 
-<section class="slide decision">
-  <div class="top"><span>Preguntas</span><span class="n"></span></div>
-  <h2>Preguntas para discutir</h2>
-  <div class="stack loose" style="font-size:22px; line-height:1.45">
-    <p>¿Por qué 307 y no 301? ¿Qué rompería una redirección permanente?</p>
-    <p>El <code>nextval()</code> de Postgres nunca devuelve un valor de una transacción revertida. ¿Por qué es el compromiso correcto?</p>
-    <p>¿Por qué el compare-and-delete de 4.3 tiene que ser un solo comando, y no un <code>GET</code> seguido de un <code>DEL</code>?</p>
-    <p>Corran cache sync desde el slot del primario. Sigan una lectura que cachea la URL vieja.</p>
+<section class="slide">
+  <div class="top"><span>5 · Ejemplo real · conexiones</span><span class="n"></span></div>
+  <h2>Conexiones: PgBouncer</h2>
+  <div class="side">
+    <div class="stack loose" style="width:400px; flex-shrink:0">
+      <div class="point"><b>Pooling por transacción</b><span>Cada conexión a Postgres se presta solo mientras dura una transacción.</span></div>
+      <div class="point"><b>Menos latencia y sin picos</b><span>No hay que abrir una conexión por pedido, y los picos de clientes no llegan a la base.</span></div>
+      <div class="point"><b>Cargas aisladas</b><span>Lo crítico y lo no crítico van separados, para evitar vecinos ruidosos.</span></div>
+    </div>
+    <figure style="margin:0; flex-grow:1; min-width:0; display:flex; align-items:center"><svg viewBox="0 0 640 396" style="width:100%; height:100%"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--soft)"/></marker></defs><rect x="240" y="6" width="160" height="40" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="320.0" y="31.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="320.0" dy="0">Pedidos</tspan></text><rect x="30" y="66" width="580" height="250" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="6 5"/><text x="46" y="90" fill="var(--muted)" font-family="JetBrains Mono, monospace" font-size="13">Clúster de Kubernetes</text><line x1="320" y1="46" x2="320" y2="104" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="210" y="104" width="220" height="44" rx="24" fill="var(--amber)" stroke="var(--amber)" stroke-width="1.5"/><text x="320.0" y="131.0" text-anchor="middle" fill="var(--bg)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="320.0" dy="0">Servicio</tspan></text><line x1="320" y1="148" x2="185" y2="188" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="70" y="188" width="230" height="110" rx="6" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="185" y="212" text-anchor="middle" fill="var(--soft)" font-family="JetBrains Mono, monospace" font-size="13">Deployment</text><rect x="82" y="228" width="98" height="52" rx="4" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="131.0" y="250.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="131.0" dy="0">PgBouncer</tspan><tspan x="131.0" dy="18">pod</tspan></text><rect x="190" y="228" width="98" height="52" rx="4" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="239.0" y="250.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="239.0" dy="0">PgBouncer</tspan><tspan x="239.0" dy="18">pod</tspan></text><line x1="185" y1="298" x2="185" y2="346" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="110" y="346" width="150" height="44" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="185.0" y="373.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="185.0" dy="0">Réplica 1</tspan></text><line x1="320" y1="148" x2="455" y2="188" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="340" y="188" width="230" height="110" rx="6" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="455" y="212" text-anchor="middle" fill="var(--soft)" font-family="JetBrains Mono, monospace" font-size="13">Deployment</text><rect x="352" y="228" width="98" height="52" rx="4" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="401.0" y="250.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="401.0" dy="0">PgBouncer</tspan><tspan x="401.0" dy="18">pod</tspan></text><rect x="460" y="228" width="98" height="52" rx="4" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="509.0" y="250.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="509.0" dy="0">PgBouncer</tspan><tspan x="509.0" dy="18">pod</tspan></text><line x1="455" y1="298" x2="455" y2="346" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="380" y="346" width="150" height="44" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="455.0" y="373.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="455.0" dy="0">Réplica 2</tspan></text></svg></figure>
   </div>
-  <p class="mt-auto m" style="font-size:15px">github.com/JM-Pascual/Systems-Design-URL-Shortener</p>
+  <p class="src">Fuente: <a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres/">InfoQ: OpenAI Scales Single Primary PostgreSQL</a> · diagrama basado en el de <a href="https://openai.com/index/scaling-postgresql/">OpenAI</a></p>
 </section>
 
-
+<section class="slide">
+  <div class="top"><span>5 · Ejemplo real · su próximo límite</span><span class="n"></span></div>
+  <h2>Replicación en cascada</h2>
+  <div class="side">
+    <div class="stack loose" style="width:400px; flex-shrink:0">
+      <div class="point"><b>Cada réplica le cuesta al primario</b><span>Le tiene que enviar el WAL a cada una: CPU y red que crecen con la cantidad de réplicas.</span></div>
+      <div class="point"><b>Réplicas intermedias</b><span>Reciben el WAL del primario y lo reenvían a las de lectura. El primario envía unas pocas copias.</span></div>
+      <div class="point"><b>Lo que siguen evaluando</b><span>Postgres shardeado y otros sistemas distribuidos.</span></div>
+    </div>
+    <figure style="margin:0; flex-grow:1; min-width:0; display:flex; align-items:center"><svg viewBox="0 0 640 330" style="width:100%; height:100%"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--soft)"/></marker></defs><rect x="250" y="10" width="140" height="48" rx="24" fill="var(--amber)" stroke="var(--amber)" stroke-width="1.5"/><text x="320.0" y="39.0" text-anchor="middle" fill="var(--bg)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="320.0" dy="0">Primario</tspan></text><line x1="320" y1="58" x2="150" y2="140" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="213.0" y="88.0" width="44" height="20" fill="var(--bg)"/><text x="235.0" y="103.0" text-anchor="middle" fill="var(--amber)" font-family="JetBrains Mono, monospace" font-size="13">WAL</text><rect x="80" y="140" width="140" height="52" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="150.0" y="162.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="150.0" dy="0">Réplica</tspan><tspan x="150.0" dy="18">intermedia</tspan></text><line x1="320" y1="58" x2="490" y2="140" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="383.0" y="88.0" width="44" height="20" fill="var(--bg)"/><text x="405.0" y="103.0" text-anchor="middle" fill="var(--amber)" font-family="JetBrains Mono, monospace" font-size="13">WAL</text><rect x="420" y="140" width="140" height="52" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="490.0" y="162.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="490.0" dy="0">Réplica</tspan><tspan x="490.0" dy="18">intermedia</tspan></text><text x="320" y="172" text-anchor="middle" fill="var(--soft)" font-size="22">…</text><line x1="150" y1="192" x2="75" y2="270" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="90.5" y="220.0" width="44" height="20" fill="var(--bg)"/><text x="112.5" y="235.0" text-anchor="middle" fill="var(--amber)" font-family="JetBrains Mono, monospace" font-size="13">WAL</text><rect x="10" y="270" width="130" height="52" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="75.0" y="292.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="75.0" dy="0">Réplica de</tspan><tspan x="75.0" dy="18">lectura</tspan></text><line x1="150" y1="192" x2="225" y2="270" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="165.5" y="220.0" width="44" height="20" fill="var(--bg)"/><text x="187.5" y="235.0" text-anchor="middle" fill="var(--amber)" font-family="JetBrains Mono, monospace" font-size="13">WAL</text><rect x="160" y="270" width="130" height="52" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="225.0" y="292.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="225.0" dy="0">Réplica de</tspan><tspan x="225.0" dy="18">lectura</tspan></text><line x1="490" y1="192" x2="415" y2="270" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="430.5" y="220.0" width="44" height="20" fill="var(--bg)"/><text x="452.5" y="235.0" text-anchor="middle" fill="var(--amber)" font-family="JetBrains Mono, monospace" font-size="13">WAL</text><rect x="350" y="270" width="130" height="52" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="415.0" y="292.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="415.0" dy="0">Réplica de</tspan><tspan x="415.0" dy="18">lectura</tspan></text><line x1="490" y1="192" x2="565" y2="270" stroke="var(--soft)" stroke-width="1.5" marker-end="url(#ah)"/><rect x="505.5" y="220.0" width="44" height="20" fill="var(--bg)"/><text x="527.5" y="235.0" text-anchor="middle" fill="var(--amber)" font-family="JetBrains Mono, monospace" font-size="13">WAL</text><rect x="500" y="270" width="130" height="52" rx="24" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.5"/><text x="565.0" y="292.0" text-anchor="middle" fill="var(--ink)" font-family="JetBrains Mono, monospace" font-size="14"><tspan x="565.0" dy="0">Réplica de</tspan><tspan x="565.0" dy="18">lectura</tspan></text><text x="150" y="302" text-anchor="middle" fill="var(--soft)" font-size="22">…</text><text x="490" y="302" text-anchor="middle" fill="var(--soft)" font-size="22">…</text></svg></figure>
+  </div>
+  <p class="src">Fuente: <a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres/">InfoQ: OpenAI Scales Single Primary PostgreSQL</a> · diagrama basado en el de <a href="https://openai.com/index/scaling-postgresql/">OpenAI</a></p>
+</section>
 </main>
 <div class="progress"></div>
 <div class="lightbox"></div>
