@@ -31,12 +31,34 @@
       <span class="v m" style="font-size:20px">POST /shorten {"url": "…"}</span>
       <span class="small">→ <code>201 {"code": "1a", "short_url": "…/1a"}</code></span>
     </div>
-    <div class="card focus"><span class="k">Redirigir</span>
-      <span class="v m" style="font-size:20px">GET /1a</span>
-      <span class="small">→ <code>307 Location: https://example.com/a/very/long/path</code></span>
+    <div class="stack" style="gap:16px">
+      <div class="card focus"><span class="k">Redirigir</span>
+        <span class="v m" style="font-size:20px">GET /1a</span>
+        <span class="small">→ <code>307 Location: https://example.com/a/very/long/path</code></span>
+      </div>
+      <p style="font-family:var(--mono); font-size:24px; color:var(--amber)">¿307 o 301 / 308?</p>
     </div>
   </div>
-  <p class="lead">Los niveles siguientes agregan <code>PATCH</code> y <code>DELETE</code> sobre un código. Poder editar adónde apunta un link es lo que vuelve difícil el caché.</p>
+</section>
+
+<section class="slide">
+  <div class="top"><span>0 · El producto</span><span class="n"></span></div>
+  <h2>Operaciones del servicio</h2>
+  <div class="cols grow" style="align-items:start">
+    <div class="card"><span class="k">Acortar</span>
+      <span class="v m" style="font-size:20px">POST /shorten {"url": "…"}</span>
+      <span class="small">→ <code>201 {"code": "1a", "short_url": "…/1a"}</code></span>
+    </div>
+    <div class="stack" style="gap:16px">
+      <div class="card focus"><span class="k">Redirigir</span>
+        <span class="v m" style="font-size:20px">GET /1a</span>
+        <span class="small">→ <code>307 Location: https://example.com/a/very/long/path</code></span>
+      </div>
+      <p style="font-family:var(--mono); font-size:24px; color:var(--amber)">¿307 o 301 / 308?</p>
+      <div class="point"><b>307 · temporal</b><span>El navegador no la guarda: la redirección vale solo para ese pedido. Cada clic vuelve a pasar por el servicio, así que editar o borrar un link se ve enseguida.</span></div>
+      <div class="point"><b>301 / 308 · permanente</b><span>El navegador la guarda y la próxima vez va directo, sin pasar por el servicio. Menos tráfico, pero una edición nunca llega a quien ya visitó el link.</span></div>
+    </div>
+  </div>
 </section>
 
 <section class="slide diagram">
@@ -83,7 +105,7 @@
   <div class="top"><span>Solución 1 · Punto de partida</span><span class="n"></span></div>
   <div class="stack loose">
     <div class="num">1</div>
-    <h1>Un único servidor, ingenuo</h1>
+    <h1>Baseline</h1>
   </div>
   <div class="strip" data-current="1"></div>
 </section>
@@ -107,34 +129,6 @@
   <div class="top"><span>1 · Diagrama</span><span class="n"></span></div>
   <figure><img src="../diagrams/tier-1-naive.svg" alt="Componentes del Nivel 1"></figure>
   <div class="cap"><span>Todo vive en un solo proceso.</span><span class="src">tier-1-naive.svg</span></div>
-</section>
-
-<section class="slide decision">
-  <div class="top"><span>Decisión clave · dentro del Nivel 1</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>¿Cómo generamos los códigos?</h2>
-    <p class="lead">Un código tiene que apuntar a exactamente una URL, para siempre. El Nivel 2 compara los dos caminos.</p>
-  </div>
-  <div class="options" style="--n:2">
-    <div><span class="k">OPCIÓN</span><b>Un hash de la URL</b><span>No hace falta un contador compartido. Pero dos URLs pueden truncarse al mismo código, así que cada escritura necesita revisar colisiones, y el código depende de la URL.</span></div>
-    <div class="chosen"><span class="k">ELEGIDA</span><b>Contador + base62</b><span>Un contador nunca se repite, así que los códigos no pueden chocar. El código no depende de la URL, así que un link se puede editar después.</span></div>
-  </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>1 · Teoría</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>Por qué contador + base62</h2>
-    <p class="lead">base62 es una <span class="hl">codificación</span>, no un hash. Solo reescribe el número del contador con 62 símbolos, <code>0-9 a-z A-Z</code>, para que sea corto y seguro en una URL.</p>
-  </div>
-  <table class="t">
-    <tr><th></th><th><code>base62::encode(n)</code></th><th><code>sha256(url)[..7]</code></th></tr>
-    <tr><td>¿Reversible?</td><td class="ok">Sí, un número ↔ un código</td><td>No, en un solo sentido</td></tr>
-    <tr><td>¿Colisiones?</td><td class="ok">Imposibles</td><td>Posibles</td></tr>
-    <tr><td>¿Depende de la URL?</td><td class="ok">No, solo del contador</td><td>Sí</td></tr>
-    <tr><td>¿Revela el orden?</td><td class="hl">Sí: /0, /1, /2 …</td><td>No</td></tr>
-  </table>
-  <p class="small mt-auto">7 caracteres cubren 62⁷ ≈ 3,5 × 10¹² links: unos 2.800 años a 40 escrituras/s. La última fila es el costo, y el Nivel 2 se ocupa de eso.</p>
 </section>
 
 <section class="slide">
@@ -162,7 +156,7 @@
   <div class="top"><span>Solución 2 · Generación de códigos · solo diseño</span><span class="n"></span></div>
   <div class="stack loose">
     <div class="num">2</div>
-    <h1>Generación de códigos y colisiones</h1>
+    <h1>Generación de códigos</h1>
   </div>
   <div class="strip" data-current="2"></div>
 </section>
@@ -237,10 +231,11 @@ CREATE SEQUENCE link_ids;</code></pre>
 
 <section class="slide">
   <div class="top"><span>3 · Código · src/store.rs</span><span class="n"></span></div>
-  <h2>El mismo codificador, otra fuente de verdad</h2>
+  <h2>Acortar y Resolver URLs en código</h2>
   <div class="code-row">
 <pre class="code"><code class="language-rust">pub async fn shorten(&amp;self, url: String) -&gt; sqlx::Result&lt;String&gt; {
     // ① Postgres decide "cuál sigue" en lugar de un u64.
+    //   nextval es atómico: nunca da el mismo número dos veces.
     let id: i64 = sqlx::query_scalar("SELECT nextval('link_ids')")
         .fetch_one(&amp;self.pool).await?;
     let code = base62::encode(id as u64);
@@ -272,13 +267,12 @@ pub async fn resolve(&amp;self, code: &amp;str) -&gt; sqlx::Result&lt;Option&lt;
       <div class="head"><i>+</i><span>Pros</span></div>
       <div class="item"><b>Sobrevive a los reinicios</b><span>Los links están en disco, protegidos por el WAL de Postgres.</span></div>
       <div class="item"><b>Sin lock global</b><span>Un pool atiende pedidos en paralelo, y MVCC los mantiene separados.</span></div>
-      <div class="item"><b>Varios servidores pueden generar códigos</b><span>Comparten una secuencia.</span></div>
     </div>
     <div>
       <div class="head con"><i>−</i><span>Contras</span></div>
       <div class="item"><b>Cada redirección cuesta una consulta</b><span>El 99% del tráfico ahora paga un viaje por la red y una búsqueda en un índice.</span></div>
       <div class="item"><b>Búsquedas más lentas</b><span>Un B-tree en disco en lugar de un hash en RAM.</span></div>
-      <div class="item"><b>Ahora los errores son reales</b><span>La red, el pool y las restricciones pueden fallar.</span></div>
+      <div class="item"><b>Suma un punto de falla extra</b><span>Postgres puede caerse, la red cortarse o el pool agotarse, y el código tiene que manejarlo.</span></div>
     </div>
   </div>
 </section>
@@ -297,8 +291,7 @@ pub async fn resolve(&amp;self, code: &amp;str) -&gt; sqlx::Result&lt;Option&lt;
 <section class="slide">
   <div class="top"><span>4.1 · Solución propuesta</span><span class="n"></span></div>
   <div class="stack">
-    <h2>La app habla con los dos. Redis nunca habla con Postgres.</h2>
-    <p class="lead">Este patrón se llama cache-aside, o look-aside.</p>
+    <h2>Patrón cache Look-Aside</h2>
   </div>
   <table class="t">
     <tr><th>Pedido</th><th>Qué pasa</th></tr>
@@ -322,35 +315,13 @@ pub async fn resolve(&amp;self, code: &amp;str) -&gt; sqlx::Result&lt;Option&lt;
 <section class="slide">
   <div class="top"><span>4.1 · Teoría</span><span class="n"></span></div>
   <div class="stack">
-    <h2>Redis en una diapositiva</h2>
-    <p class="lead">La tabla hash del Nivel 1, llevada a la red y compartida por todos los servidores. Guarda los datos en memoria, por eso es rápido, y es un proceso aparte, por eso puede fallar por su cuenta.</p>
+    <h2>Redis como servicio de caché</h2>
+    <p class="lead">Una base de datos NoSQL clave-valor en memoria. Ofrece latencias muy bajas y primitivas que nos van a ayudar a resolver los problemas que vienen.</p>
   </div>
   <div class="cols" style="--n:3; gap:20px">
     <div class="card"><span class="k">Escribir</span><span class="v m">SET 3d7 "https://…" EX 300</span><span class="small">Guarda un valor que vence en 300 segundos.</span></div>
     <div class="card focus"><span class="k">Leer</span><span class="v m">GET 3d7</span><span class="small">La URL, o nil si no está.</span></div>
     <div class="card"><span class="k">Borrar</span><span class="v m">DEL 3d7</span><span class="small">Desaparece. Hacerlo dos veces no cambia nada.</span></div>
-  </div>
-  <div class="cols mt-auto" style="--n:3">
-    <div class="point"><b>Como HashMap::get e insert</b><span>Pero por la red, con un milisegundo o menos por llamada.</span></div>
-    <div class="point"><b>Cada clave puede vencer</b><span>Un TTL hace que Redis olvide una clave solo.</span></div>
-    <div class="point"><b>La memoria es limitada</b><span>Cuando se llena, una política de desalojo elige qué sale. Más en 4.3.</span></div>
-  </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>4.1 · Teoría</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>El TTL: viejo, pero se arregla solo</h2>
-    <p class="lead">Cada valor cacheado vence a los 5 minutos. Pase lo que pase, un valor incorrecto vive como mucho un TTL, y ningún código tiene que detectarlo.</p>
-  </div>
-  <div class="cols" style="--n:3; gap:20px">
-    <div class="card"><span class="k">Falla un DEL</span><span class="small">La escritura queda confirmada. El valor viejo vence.</span></div>
-    <div class="card"><span class="k">Una carrera cachea una URL vieja</span><span class="small">También vence.</span></div>
-    <div class="card"><span class="k">Alguien edita Postgres a mano</span><span class="small">Lo mismo.</span></div>
-  </div>
-  <div class="row mt-auto" style="align-items:flex-end; justify-content:space-between">
-    <p class="lead" style="max-width:760px">El compromiso: un TTL más corto da menos datos viejos y más consultas a Postgres. AWS presenta lazy loading más un TTL como la combinación estándar, y 5 minutos es el valor de su ejemplo.</p>
-    <span class="src"><a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html">ElastiCache caching strategies</a></span>
   </div>
 </section>
 
@@ -415,13 +386,47 @@ async fn invalidate(&amp;self, code: &amp;str) {
 </section>
 
 <section class="slide">
+  <div class="top"><span>4.1 · Teoría</span><span class="n"></span></div>
+  <div class="stack">
+    <h2>TTL como política de corrección</h2>
+    <p class="lead">Cada valor cacheado vence a los 5 minutos. Pase lo que pase, un valor incorrecto vive como mucho un TTL, y ningún código tiene que detectarlo.</p>
+  </div>
+  <div class="cols" style="--n:3; gap:20px">
+    <div class="card"><span class="k">Falla un DEL</span><span class="small">La escritura queda confirmada. El valor viejo vence.</span></div>
+    <div class="card"><span class="k">Una carrera cachea una URL vieja</span><span class="small">También vence.</span></div>
+    <div class="card"><span class="k">Alguien edita Postgres a mano</span><span class="small">Lo mismo.</span></div>
+  </div>
+  <div class="row mt-auto" style="align-items:flex-end; justify-content:space-between">
+    <p class="lead" style="max-width:760px">El compromiso: un TTL más corto da menos datos viejos y más consultas a Postgres. AWS presenta lazy loading más un TTL como la combinación estándar, y 5 minutos es el valor de su ejemplo.</p>
+    <span class="src"><a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html">ElastiCache caching strategies</a></span>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="top"><span>4.1 · Teoría · carrera</span><span class="n"></span></div>
+  <h2>Una carrera: el SET que llega tarde</h2>
+  <table class="t" style="font-size:23px">
+    <tr><th>Paso</th><th>Cliente</th><th>Operación</th><th>Postgres</th><th>Caché</th></tr>
+    <tr class="step"><td>1</td><td>Cliente 1</td><td><code>GET 3d7</code> → nil, es un miss</td><td>url_vieja</td><td>—</td></tr>
+    <tr class="step"><td>2</td><td>Cliente 1</td><td><code>SELECT</code> → url_vieja</td><td>url_vieja</td><td>—</td></tr>
+    <tr class="step"><td>3</td><td>Cliente 2</td><td><code>UPDATE</code> → url_nueva</td><td>url_nueva</td><td>—</td></tr>
+    <tr class="step"><td>4</td><td>Cliente 2</td><td><code>DEL 3d7</code> → no hay nada que borrar</td><td>url_nueva</td><td>—</td></tr>
+    <tr class="step on"><td>5</td><td>Cliente 1</td><td><code>SET 3d7 url_vieja EX 300</code></td><td>url_nueva</td><td>url_vieja</td></tr>
+  </table>
+  <div class="row mt-auto" style="align-items:flex-end; justify-content:space-between">
+    <p class="lead step" style="max-width:820px">El <code>SELECT</code> y el <code>SET</code> no son atómicos, y el <code>DEL</code> cae en el medio. El TTL limita el daño a 5 minutos. El Nivel 4.3 lo cierra.</p>
+    <span class="src"><a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf">Scaling Memcache at Facebook, §3.2.1</a></span>
+  </div>
+</section>
+
+<section class="slide">
   <div class="top"><span>4.1 · Pros y contras</span><span class="n"></span></div>
   <div class="pc">
     <div>
       <div class="head"><i>+</i><span>Pros</span></div>
       <div class="item"><b>La mayoría de las redirecciones evita Postgres</b><span>Un hit es un <code>GET</code> desde memoria.</span></div>
       <div class="item"><b>Redis es opcional</b><span>Cuando falla, las lecturas vuelven a Postgres.</span></div>
-      <div class="item"><b>Tres reglas, una red de seguridad</b><span>El TTL repara cualquier cosa que salga mal.</span></div>
+      <div class="item"><b>El TTL limita los datos stale</b><span>El TTL limita el tiempo que ofrezco datos antiguos.</span></div>
     </div>
     <div>
       <div class="head con"><i>−</i><span>Contras, a propósito</span></div>
@@ -450,14 +455,13 @@ async fn invalidate(&amp;self, code: &amp;str) {
     <div class="stack loose" style="width:440px">
       <div class="stack"><span class="label">Problema</span><p style="font-size:24px; line-height:1.4">Un código que nunca se generó cuesta una consulta completa a Postgres, cada vez.</p></div>
       <div class="stack"><span class="label">Solución</span><p style="font-size:24px; line-height:1.4">Un filtro de RedisBloom con todos los códigos, consultado tras un miss, antes de Postgres.</p></div>
-      <p class="small">El filtro solo puede decir "no está" si se sabe que está completo. La clave <code>bloom:ready</code> lo registra.</p>
     </div>
     <div class="grow">
       <table class="t">
-        <tr><th>bloom:ready</th><th>BF.EXISTS</th><th>resolve hace</th></tr>
-        <tr><td>no está</td><td>se ignora</td><td>Consulta Postgres</td></tr>
-        <tr><td>está</td><td>1</td><td>Consulta Postgres: puede ser un falso positivo</td></tr>
-        <tr class="on"><td>está</td><td>0</td><td>404, sin consulta</td></tr>
+        <tr><th>Existe / No existe código</th><th>Respuesta del filtro</th><th>Resolve hace</th></tr>
+        <tr><td>Existe</td><td>Quizás está</td><td>Consulta Postgres y redirige</td></tr>
+        <tr><td>No existe</td><td>Quizás está</td><td>Consulta Postgres y da 404: un falso positivo</td></tr>
+        <tr class="on"><td>No existe</td><td>No está</td><td>404, sin consulta</td></tr>
       </table>
     </div>
   </div>
@@ -507,15 +511,16 @@ async fn invalidate(&amp;self, code: &amp;str) {
 <section class="slide">
   <div class="top"><span>4.2 · Teoría · mantenerlo completo</span><span class="n"></span></div>
   <div class="stack">
-    <h2>Un filtro dentro de un caché descartable</h2>
-    <p class="lead">Un falso negativo hace que un link real dé 404, lo único que el Nivel 0 prohíbe. Y Redis se puede vaciar en cualquier momento.</p>
+    <h2>Riesgo agregado: falso negativo en el filtro</h2>
+    <p class="lead">Si el filtro dice "no está" para un código que existe, un link real da 404. Hay tres formas de que pase.</p>
   </div>
-  <div class="cols" style="--n:3; gap:20px">
-    <div class="card"><span class="k">Orden de escritura</span><span class="v">Filtro, después INSERT</span><span class="small">Al revés que en 4.1. Un INSERT fallido deja un falso positivo; el otro orden podría dejar un falso negativo.</span></div>
-    <div class="card"><span class="k">Un job por minuto</span><span class="v">Reparar o reconstruir</span><span class="small">Vuelve a agregar los códigos de los últimos 5 minutos. Si falta <code>bloom:ready</code>, reconstruye el filtro y después lo marca.</span></div>
-    <div class="card focus"><span class="k">Snapshot diario</span><span class="v">BF.SCANDUMP a un bucket</span><span class="small">Una reconstrucción lo restaura y agrega solo los códigos nuevos, como un nodo de Raft restaura un snapshot.</span></div>
-  </div>
-  <p class="small mt-auto">Los snapshots van a un bucket compatible con S3 porque crecen: unos 1,4 GB para 1.200 millones de códigos. Un advisory lock de Postgres limita el job a una sola instancia.</p>
+  <table class="t" style="font-size:21px">
+    <tr><th>Cómo se pierde un código</th><th>Qué lo evita</th></tr>
+    <tr><td style="white-space:normal">El INSERT llega a Postgres pero el código no entra al filtro</td><td><b>Filtro primero.</b> Si <code>BF.INSERT</code> falla, el acortado falla y no se guarda nada.</td></tr>
+    <tr><td style="white-space:normal">Redis confirma el <code>BF.INSERT</code> y se cae antes de persistirlo</td><td><b>Un job cada minuto</b> vuelve a agregar los códigos de los últimos 5 minutos.</td></tr>
+    <tr class="on"><td style="white-space:normal">Redis se vacía y el filtro queda vacío</td><td><b>La marca <code>bloom:ready</code>.</b> Sin ella el filtro siempre dice "quizás"; el job lo reconstruye y recién después pone la marca.</td></tr>
+  </table>
+  <p class="small mt-auto">Reconstruir desde Postgres es lento a escala, así que el job restaura un snapshot diario del bucket y agrega solo lo nuevo.</p>
 </section>
 
 <section class="slide">
@@ -578,6 +583,7 @@ match self.bloom.might_exist(code).await {
       <div><b>Simplificado</b><span>En el código real, el chequeo del snapshot es una consulta en línea.</span></div>
     </div>
   </div>
+  <p class="src">Advisory locks: <a href="https://pgpedia.info/p/pg_try_advisory_xact_lock.html">pg_try_advisory_xact_lock</a> · <a href="https://pgpedia.info/a/advisory-locking.html">advisory locking</a>, pgPedia</p>
 </section>
 
 <section class="slide">
@@ -586,16 +592,13 @@ match self.bloom.might_exist(code).await {
     <div>
       <div class="head"><i>+</i><span>Pros</span></div>
       <div class="item"><b>Los códigos inexistentes evitan Postgres</b><span>Un 404 directo desde Redis.</span></div>
-      <div class="item"><b>Nunca un 404 falso</b><span>La marca protege cada "no está".</span></div>
-      <div class="item"><b>Se cura solo</b><span>Un vaciado vuelve a Postgres, y después el job reconstruye.</span></div>
       <div class="item"><b>Reinicios baratos</b><span>Un snapshot evita recorrer todos los links.</span></div>
     </div>
     <div>
       <div class="head con"><i>−</i><span>Contras</span></div>
       <div class="item"><b>Las carreras de 4.1 siguen abiertas</b><span>La estampida y el stale set.</span></div>
-      <div class="item"><b>Acortar necesita Redis</b><span>Mientras Redis está caído, devuelve 500.</span></div>
+      <div class="item"><b>Acortar ahora necesita una política con Redis caído</b><span>Fallar con un 500, guardar una lista de códigos pendientes de agregar al filtro, o esperar a que el job los repare.</span></div>
       <div class="item"><b>Los códigos borrados quedan</b><span>Un filtro no puede olvidar. Consultan Postgres cada vez.</span></div>
-      <div class="item"><b>Un minuto de 404</b><span>Para un código perdido en una caída de Redis, hasta que el job lo repara.</span></div>
     </div>
   </div>
 </section>
@@ -606,7 +609,7 @@ match self.bloom.might_exist(code).await {
   <div class="top"><span>Solución 4.3 · Caché</span><span class="n"></span></div>
   <div class="stack loose">
     <div class="num">4.3</div>
-    <h1>Una nota en la clave</h1>
+    <h1>Sistema de leases</h1>
   </div>
   <div class="strip" data-current="4.3"></div>
 </section>
@@ -616,16 +619,17 @@ match self.bloom.might_exist(code).await {
   <div class="row grow">
     <div class="stack loose" style="width:440px">
       <div class="stack"><span class="label">Problema</span><p style="font-size:22px; line-height:1.4"><b>Estampida:</b> vence una clave popular y todos los pedidos consultan Postgres. <b>Stale set:</b> una lectura lenta cachea una URL vieja después del <code>DEL</code> de una escritura.</p></div>
-      <div class="stack"><span class="label">Solución</span><p style="font-size:22px; line-height:1.4">La nota es <code>"\0" + hex aleatorio</code>, guardada bajo el mismo código. Ninguna URL empieza con un byte NUL.</p></div>
+      <div class="stack"><span class="label">Solución</span><p style="font-size:22px; line-height:1.4">Obtenemos un lease a partir de insertar un hex aleatorio bajo la key. Lectores posteriores de esa key saben que nosotros tenemos el lease y deben esperar.</p></div>
     </div>
     <div class="grow">
       <table class="t tight">
-        <tr><th>Situación</th><th>Comandos de Redis</th></tr>
-        <tr><td>Hit</td><td><code>GET</code></td></tr>
-        <tr class="on"><td>Primer lector</td><td><code>SET code note NX PX 2000</code> → <code>SELECT</code> → <code>SET code url IFEQ note</code></td></tr>
-        <tr><td>Los demás</td><td><code>GET</code> cada 50 ms; a los 200 ms, <code>SELECT</code> sin cachear</td></tr>
-        <tr><td>Sin fila</td><td><code>DELEX code IFEQ note</code></td></tr>
-        <tr><td>Escrituras</td><td><code>UPDATE</code>, luego <code>DEL code</code>. Nunca esperan.</td></tr>
+        <tr><th>Paso</th><th>Cliente</th><th>Operación</th><th>Caché</th></tr>
+        <tr class="step"><td>1</td><td>Cliente 1</td><td><code>GET 3d7</code> → nil, es un miss</td><td>—</td></tr>
+        <tr class="step"><td>2</td><td>Cliente 1</td><td><code>SET 3d7 nota₁ NX PX 2000</code> → OK, tiene el lease</td><td><code>nota₁</code></td></tr>
+        <tr class="step"><td>3</td><td>Cliente 3</td><td><code>GET 3d7</code> → <code>nota₁</code>: espera y reintenta</td><td><code>nota₁</code></td></tr>
+        <tr class="step"><td>4</td><td>Cliente 1</td><td><code>SELECT</code> → url_vieja</td><td><code>nota₁</code></td></tr>
+        <tr class="step"><td>5</td><td>Cliente 2</td><td><code>UPDATE</code> → url_nueva, luego <code>DEL 3d7</code></td><td>—</td></tr>
+        <tr class="step on"><td>6</td><td>Cliente 1</td><td><code>SET 3d7 url_vieja IFEQ nota₁</code> → rechazado</td><td>—</td></tr>
       </table>
     </div>
   </div>
@@ -639,29 +643,13 @@ match self.bloom.might_exist(code).await {
 
 <section class="slide">
   <div class="top"><span>4.3 · Teoría · patrones</span><span class="n"></span></div>
-  <h2>Formas de domar una estampida</h2>
-  <table class="t tight">
-    <tr><th>Patrón</th><th>Cómo</th><th>¿Stale set?</th><th>Costo</th></tr>
-    <tr><td>Clave de lock aparte</td><td><code>SET lock:{code} NX PX</code>, luego reconstruir</td><td>No</td><td>Un <code>DEL</code> del valor no frena la reconstrucción. Dos claves que se pueden desfasar, y en un clúster necesitan un hash tag.</td></tr>
-    <tr><td>Scripts de Lua</td><td>Verificar y actuar, atómico en el servidor</td><td>Sí</td><td>Lo estándar antes de Redis 8.4. Un script que cargar y mantener.</td></tr>
-    <tr><td>Singleflight</td><td>Unir misses en un proceso</td><td>No</td><td>No ayuda entre servidores.</td></tr>
-    <tr><td>Refresco anticipado (XFetch)</td><td>Refrescar antes de vencer, con probabilidad creciente</td><td>No</td><td>Solo claves populares. Sin lock.</td></tr>
-    <tr class="on"><td>Nota en la clave</td><td><code>SET NX</code>, luego <code>SET IFEQ</code></td><td>Sí</td><td>Redis 8.4, y cada lector revisa el prefijo.</td></tr>
-  </table>
-</section>
-
-<section class="slide">
-  <div class="top"><span>4.3 · Teoría · Redis 8.4</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>Tres comandos reemplazan los scripts de Lua</h2>
-    <p class="lead"><code>MULTI</code>/<code>EXEC</code> solo encola comandos; no puede decidir según un valor. Por eso verificar-y-actuar necesitaba Lua. Ahora cada uno es un solo comando atómico.</p>
+  <h2>Otras técnicas válidas</h2>
+  <div class="cols grow" style="row-gap:36px; align-content:center">
+    <div class="point"><b style="font-size:26px">Jitter en el TTL de las keys</b><span style="font-size:20px">Sumar unos segundos aleatorios a cada TTL, así las keys cacheadas juntas no vencen en el mismo segundo.</span></div>
+    <div class="point"><b style="font-size:26px">Key de lock + script de Lua</b><span style="font-size:20px">Una key aparte, <code>lock:{code}</code>, decide quién reconstruye, y Lua hace atómico el verificar-y-escribir. Lo estándar antes de Redis 8.4.</span></div>
+    <div class="point"><b style="font-size:26px">Singleflight en cada instancia</b><span style="font-size:20px">Los misses simultáneos de un mismo proceso esperan una sola consulta. No coordina entre servidores.</span></div>
+    <div class="point"><b style="font-size:26px">XFetch</b><span style="font-size:20px">Refrescar la key antes de que venza, con una probabilidad que crece a medida que se acerca el vencimiento. No necesita lock.</span></div>
   </div>
-  <div class="cols" style="--n:3; gap:20px">
-    <div class="card"><span class="k">Tomar la clave</span><span class="v m" style="font-size:19px">SET code note NX PX 2000</span><span class="small">Solo si la clave está vacía. Vence en 2 s, así un reconstructor caído la libera.</span></div>
-    <div class="card focus"><span class="k">Llenar, si sigue siendo nuestra</span><span class="v m" style="font-size:19px">SET code url IFEQ note</span><span class="small">Se rechaza si un <code>DEL</code> borró la nota. Reemplaza el script de compare-and-set.</span></div>
-    <div class="card"><span class="k">Abandonar, si sigue siendo nuestra</span><span class="v m" style="font-size:19px">DELEX code IFEQ note</span><span class="small">Libera la clave sin borrar la nota de otro. Reemplaza el script de unlock.</span></div>
-  </div>
-  <p class="src mt-auto"><a href="https://redis.io/docs/latest/commands/set/">redis.io: SET</a> · <a href="https://redis.io/docs/latest/commands/delex/">DELEX</a></p>
 </section>
 
 <section class="slide">
@@ -678,26 +666,6 @@ match self.bloom.might_exist(code).await {
   <div class="row mt-auto" style="justify-content:space-between; align-items:flex-end">
     <p class="small" style="max-width:780px">También: <b>rueidisaside</b>, una librería de Go de Redis, guarda un marcador en la clave, pero con scripts de Lua escritos antes de <code>IFEQ</code>. Los leases de memcache de Facebook lo hacen con un token del servidor.</p>
     <span class="src"><a href="https://github.com/Shopify/identity_cache">github.com/Shopify/identity_cache</a></span>
-  </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>4.3 · Teoría</span><span class="n"></span></div>
-  <h2>Jitter del TTL y desalojo</h2>
-  <div class="cols grow">
-    <div class="stack loose">
-      <span class="label">Jitter</span>
-      <p class="lead">Cada TTL es de 300 s más 0 a 10 segundos aleatorios. Las claves cacheadas juntas, por ejemplo justo después de un reinicio, no vencen todas en el mismo segundo.</p>
-      <div class="cells"><div class="on">300</div><div class="on">303</div><div class="on">307</div><div class="on">301</div><div class="on">309</div><div class="on">305</div></div>
-    </div>
-    <div class="stack loose">
-      <span class="label">Desalojo</span>
-      <table class="t tight">
-        <tr><td><code>maxmemory</code></td><td><code>8mb</code>, chico a propósito, para ver el desalojo</td></tr>
-        <tr class="on"><td><code>maxmemory-policy</code></td><td><code>volatile-lfu</code></td></tr>
-      </table>
-      <p class="small">Desaloja solo claves con TTL, las menos usadas primero. Las URLs y las notas tienen uno. El filtro y <code>bloom:ready</code> no, así que nunca se desalojan.</p>
-    </div>
   </div>
 </section>
 
@@ -748,7 +716,8 @@ match self.bloom.might_exist(code).await {
         Ok(Some(url)) =&gt; redis::cmd("SET").arg(code).arg(url)
             .arg("IFEQ").arg(note)
             .arg("EX").arg(jittered_ttl()).clone(),
-        // ② No hay fila, o Postgres falló: liberar la clave ya.
+        // ② No hay resultado en la base de datos, o Postgres falló:
+        //    liberar la clave ya.
         _ =&gt; redis::cmd("DELEX").arg(code)
             .arg("IFEQ").arg(note).clone(),
     };
@@ -765,17 +734,28 @@ match self.bloom.might_exist(code).await {
   </div>
 </section>
 
-<section class="slide">
+<section class="slide title">
   <div class="top"><span>4.3 · Demo · thundering-herd-demo/</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>La misma estampida, dos veces</h2>
-    <p class="lead">Tres ráfagas de 50 pedidos concurrentes sobre una clave fría, con 150 ms extra en cada consulta a Postgres para que los misses se superpongan. Prometheus y Grafana miran las dos apps.</p>
+  <div class="stack loose">
+    <h1>Thundering Herd - Demo</h1>
+    <p>5 ráfagas<br>20 keys de Redis invalidadas por ráfaga</p>
   </div>
-  <div class="cols" style="--n:2; gap:20px">
-    <div class="card"><span class="k">Nivel 4.1 · sin coordinación</span><span class="big">150</span><span class="small">consultas a Postgres: una por pedido.</span></div>
-    <div class="card focus"><span class="k">Nivel 4.3 · una nota en la clave</span><span class="big">3</span><span class="small">consultas a Postgres: una por ráfaga.</span></div>
-  </div>
-  <p class="small mt-auto">Para correrla en vivo: <code>docker compose up -d</code> en <code>thundering-herd-demo/</code>, levantar los dos niveles con <code>DEMO_QUERY_DELAY_MS=150</code>, y después <code>./load-test.sh</code>.</p>
+  <div class="strip" data-current="4.3"></div>
+</section>
+
+<section class="slide">
+  <div class="top"><span>4.3 · Teoría · un DEL perdido</span><span class="n"></span></div>
+  <h2>Un DEL perdido: la escritura durante una caída</h2>
+  <table class="t" style="font-size:23px">
+    <tr><th>Paso</th><th>Cliente</th><th>Operación</th><th>Postgres</th><th>Caché</th></tr>
+    <tr class="step"><td>1</td><td>Cliente 1</td><td><code>GET 3d7</code> → url_vieja, es un hit</td><td>url_vieja</td><td>url_vieja</td></tr>
+    <tr class="step"><td>2</td><td>Redis</td><td>Se cae, o deja de responder</td><td>url_vieja</td><td>url_vieja</td></tr>
+    <tr class="step"><td>3</td><td>Cliente 2</td><td><code>UPDATE</code> → url_nueva</td><td>url_nueva</td><td>url_vieja</td></tr>
+    <tr class="step"><td>4</td><td>Cliente 2</td><td><code>DEL 3d7</code> → error, se registra y sigue</td><td>url_nueva</td><td>url_vieja</td></tr>
+    <tr class="step"><td>5</td><td>Redis</td><td>Vuelve con sus datos</td><td>url_nueva</td><td>url_vieja</td></tr>
+    <tr class="step on"><td>6</td><td>Cliente 3</td><td><code>GET 3d7</code> → url_vieja, hasta que venza el TTL</td><td>url_nueva</td><td>url_vieja</td></tr>
+  </table>
+  <p class="lead step mt-auto" style="max-width:900px">El <code>DEL</code> se mandó una sola vez, con Redis caído, y nada lo reintenta.</p>
 </section>
 
 <section class="slide">
@@ -785,15 +765,11 @@ match self.bloom.might_exist(code).await {
       <div class="head"><i>+</i><span>Pros</span></div>
       <div class="item"><b>Una consulta por estampida</b><span>150 consultas pasan a ser 3 en la demo.</span></div>
       <div class="item"><b>Sin stale sets</b><span>Mientras cada comando funcione, ningún orden de lecturas y escrituras cachea una URL vieja.</span></div>
-      <div class="item"><b>Sin Lua</b><span>Comandos atómicos únicos.</span></div>
-      <div class="item"><b>Desalojo seguro</b><span>El filtro nunca se desaloja. El jitter reparte los vencimientos.</span></div>
     </div>
     <div>
       <div class="head con"><i>−</i><span>Contras</span></div>
-      <div class="item"><b>Un DEL perdido</b><span>Un corte de Redis o una caída después del commit deja la URL vieja hasta 310 s.</span></div>
-      <div class="item"><b>Escrituras durante una caída</b><span>Sus <code>DEL</code> fallan, y los valores viejos pueden volver con Redis.</span></div>
-      <div class="item"><b>Requiere Redis 8.4</b><span>Y cada lector tiene que revisar el prefijo NUL.</span></div>
-      <div class="item"><b>Reconstrucciones lentas</b><span>Pasados 200 ms, los que esperan van a Postgres.</span></div>
+      <div class="item"><b>Un DEL perdido</b><span>Si Redis está caído o la app se cae después del commit, el <code>DEL</code> no llega. Cuando Redis vuelve con sus datos, la URL vieja queda hasta un TTL.</span></div>
+      <div class="item"><b>Política de espera</b><span>Se requiere de una política para aquellos que esperen mucho tiempo a que un lease se resuelva.</span></div>
     </div>
   </div>
 </section>
@@ -813,7 +789,7 @@ match self.bloom.might_exist(code).await {
   <div class="top"><span>4.4 · Solución propuesta</span><span class="n"></span></div>
   <div class="row grow">
     <div class="stack loose" style="width:460px">
-      <div class="stack"><span class="label">Problema</span><p style="font-size:24px; line-height:1.4">El handler hace commit y su <code>DEL</code> falla. Las ediciones hechas en <code>psql</code> nunca se invalidan.</p></div>
+      <div class="stack"><span class="label">Problema</span><p style="font-size:24px; line-height:1.4">El handler hace commit y su <code>DEL</code> falla. Las ediciones hechas en <code>psql</code> o por otros sistemas nunca invalidan Redis.</p></div>
       <div class="stack"><span class="label">Solución · change data capture</span><p style="font-size:24px; line-height:1.4">Postgres ya registra cada cambio confirmado. El invalidador lee ese log y borra cada código cambiado, reintentando hasta que Redis acepta.</p></div>
     </div>
     <div class="grow">
@@ -848,22 +824,7 @@ match self.bloom.might_exist(code).await {
     <div class="point"><b>Sobrevive a reinicios</b><span>Se guarda en disco. Un worker caído retoma donde confirmó.</span></div>
     <div class="point"><b>Puede llenar el disco</b><span>Un worker trabado hace crecer el WAL, con un tope de <code>max_slot_wal_keep_size</code>.</span></div>
   </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>4.4 · Teoría · decodificación lógica</span><span class="n"></span></div>
-  <h2>De bytes del WAL a cambios de filas</h2>
-  <div class="cols" style="--n:4; gap:16px">
-    <div class="card"><span class="k">1 · wal_level=logical</span><span class="small">Postgres registra lo suficiente para rearmar cada cambio de fila.</span></div>
-    <div class="card"><span class="k">2 · Publicación</span><span class="small"><code>links_pub</code> elige las tablas a transmitir.</span></div>
-    <div class="card"><span class="k">3 · Slot</span><span class="small"><code>cache_invalidator</code> recuerda hasta dónde confirmamos.</span></div>
-    <div class="card focus"><span class="k">4 · Stream</span><span class="small">Una transacción confirmada a la vez, en formato <code>pgoutput</code>.</span></div>
-  </div>
-  <div class="stack mt-auto" style="gap:10px">
-    <span class="label">Una transacción en el cable</span>
-    <div class="cells"><div class="edge">B · Begin</div><div class="on">U · Update 3d7</div><div class="on">D · Delete 1a</div><div class="edge">C · Commit, end_lsn</div></div>
-    <p class="small">Solo una conexión puede usar un slot, así que con varias instancias de la app las demás reintentan cada segundo. El slot funciona también como lock. El crate <code>pgwire-replication</code> habla el protocolo.</p>
-  </div>
+  <p class="src"><a href="https://neon.com/docs/guides/logical-replication-concepts">Neon: logical replication concepts</a></p>
 </section>
 
 <section class="slide">
@@ -923,12 +884,10 @@ while let Some(event) = changes.recv().await? {
 
 <section class="slide">
   <div class="top"><span>4.4 · Teoría · carreras</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>Las dos carreras del paper de Facebook</h2>
-    <p class="lead">Las dos terminan igual: se escribe un valor viejo después de la invalidación que debía sacarlo.</p>
-  </div>
+  <h2>RC's y problemas del paper de Facebook</h2>
   <table class="t">
-    <tr><th>Carrera</th><th>Qué pasa</th><th>Estado</th></tr>
+    <tr><th>Problema</th><th>Qué pasa</th><th>Estado</th></tr>
+    <tr><td>Thundering herd · estampida</td><td>Vencen una o varias claves populares y todos los pedidos consultan Postgres al mismo tiempo.</td><td class="ok">Cerrada en 4.3</td></tr>
     <tr><td>Carrera 2 · stale set</td><td>Una lectura lenta cachea la URL vieja después del <code>DEL</code> de una escritura, dentro de una región.</td><td class="ok">Cerrada en 4.3</td></tr>
     <tr><td>Invalidación perdida</td><td>El <code>DEL</code> nunca llega.</td><td class="ok">Cerrada en 4.4</td></tr>
     <tr class="on"><td>Carrera 1 · entre regiones</td><td>El <code>DEL</code> llega antes de que una réplica atrasada tenga el valor nuevo, y un lector cachea el viejo.</td><td>Necesita réplicas: Nivel 5</td></tr>
@@ -941,17 +900,16 @@ while let Some(event) = changes.recv().await? {
   <div class="pc">
     <div>
       <div class="head"><i>+</i><span>Pros</span></div>
-      <div class="item"><b>Los DEL perdidos se reparan</b><span>Tras el retraso del worker, no tras un TTL de 310 s.</span></div>
+      <div class="item"><b>Los DEL perdidos se reparan</b><span>Tras el retraso del worker, no tras un TTL.</span></div>
       <div class="item"><b>Las ediciones manuales se invalidan</b><span>Un <code>UPDATE</code> en psql también llega a Redis.</span></div>
-      <div class="item"><b>Se mantiene read-your-writes</b><span>El <code>DEL</code> del handler sigue llegando primero.</span></div>
-      <div class="item"><b>Ningún servicio nuevo</b><span>Una tarea dentro de la app. El slot es el lock entre instancias.</span></div>
+      <div class="item"><b>Se mantiene read-your-writes</b><span>Sin fallas en Redis, el <code>DEL</code> del handler sigue llegando primero.</span></div>
+      <div class="item"><b>Ningún servicio nuevo</b><span>Una tarea dentro de la app.</span></div>
     </div>
     <div>
       <div class="head con"><i>−</i><span>Contras</span></div>
       <div class="item"><b>Un worker roto se esconde</b><span>El <code>DEL</code> del handler lo tapa hasta un corte. Hay que alertar sobre el retraso del slot.</span></div>
       <div class="item"><b>El WAL se acumula si está caído</b><span>Pasado 1 GB Postgres descarta el slot, y el TTL vuelve a ser la red de seguridad.</span></div>
       <div class="item"><b>Un miss extra por escritura</b><span>El segundo <code>DEL</code> puede borrar un valor ya reconstruido.</span></div>
-      <div class="item"><b>Sin failover</b><span>Los slots siguen a una réplica promovida recién desde Postgres 17.</span></div>
     </div>
   </div>
 </section>
@@ -967,55 +925,40 @@ while let Some(event) = changes.recv().await? {
   <div class="strip" data-current="5"></div>
 </section>
 
-<section class="slide">
-  <div class="top"><span>5 · Antecedente · blog de ingeniería de OpenAI</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>Cómo corre OpenAI el Postgres de ChatGPT</h2>
-    <p class="lead">Uno de los Postgres con más carga del mundo no usa sharding: un solo escritor, copiado a todas partes.</p>
-  </div>
+<section class="slide" style="gap:20px; padding:44px 80px 40px">
+  <div class="top"><span>5 · Ejemplo real · OpenAI · ChatGPT</span><span class="n"></span></div>
+  <h2>Ejemplo real: cargas de lectura intensivas</h2>
   <div class="cols" style="--n:4; gap:16px">
-    <div class="card focus"><span class="k">Escrituras</span><span class="big">1</span><span class="small">primario, Azure Database for PostgreSQL</span></div>
-    <div class="card"><span class="k">Lecturas</span><span class="big">~50</span><span class="small">réplicas en distintas regiones</span></div>
-    <div class="card"><span class="k">Adelante</span><span class="big" style="font-size:44px">Caché</span><span class="small">casi ninguna lectura llega a la base</span></div>
-    <div class="card"><span class="k">Sharding</span><span class="big" style="font-size:44px">No</span><span class="small">lo nuevo con muchas escrituras va a Cosmos DB</span></div>
+    <div class="card focus"><span class="k">Escrituras</span><span class="big">1</span><span class="small">primario de Postgres, sin sharding</span></div>
+    <div class="card"><span class="k">Lecturas</span><span class="big">~50</span><span class="small">réplicas en distintas regiones, para 800 M de usuarios</span></div>
+    <div class="card"><span class="k">Conexiones</span><span class="big" style="font-size:40px">PgBouncer</span><span class="small">los picos de clientes no llegan a Postgres</span></div>
+    <div class="card"><span class="k">Muchas escrituras</span><span class="big" style="font-size:40px">Cosmos DB</span><span class="small">lo nuevo que no necesita esas garantías, shardeado</span></div>
   </div>
+  <div class="card focus"><span class="k">La conclusión</span><span style="font-size:21px; line-height:1.4">Un solo escritor evita las escrituras distribuidas: transacciones y consistencia fuerte en las escrituras. Las lecturas escalan con réplicas que pueden estar un poco atrasadas.</span></div>
   <div class="cols mt-auto" style="--n:2">
-    <div class="point"><b>Por qué les funciona</b><span>Su carga es casi toda de lecturas. La nuestra también: unas 100 redirecciones por link, según el Nivel 0.</span></div>
-    <div class="point"><b>El límite que están atacando</b><span>El primario envía el WAL a cada réplica, así que prueban replicación en cascada: réplicas que reenvían el WAL a otras.</span></div>
+    <div class="point"><b>Sus fallas son las nuestras</b><span>Una de sus fallas comunes son las tormentas de cache misses: la estampida de 4.3.</span></div>
+    <div class="point"><b>Su próximo límite</b><span>El primario envía el WAL a cada réplica, así que prueban replicación en cascada: réplicas que lo reenvían a otras.</span></div>
   </div>
-  <p class="src"><a href="https://openai.com/es-419/index/scaling-postgresql/">openai.com/index/scaling-postgresql</a> · <a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres">resumen de InfoQ</a></p>
+  <p class="src"><a href="https://www.infoq.com/news/2026/02/openai-runs-chatgpt-postgres/">InfoQ: OpenAI Scales Single Primary PostgreSQL</a> · <a href="https://openai.com/index/scaling-postgresql/">openai.com/index/scaling-postgresql</a></p>
 </section>
 
 <section class="slide">
   <div class="top"><span>5 · Solución propuesta</span><span class="n"></span></div>
-  <div class="row grow">
-    <div class="stack loose" style="width:440px">
-      <div class="stack"><span class="label">Problema</span><p style="font-size:22px; line-height:1.4">Un cliente lejano paga un viaje largo en cada redirección. Si Redis falla, el único Postgres recibe toda la carga de lecturas.</p></div>
-      <div class="stack"><span class="label">Solución</span><p style="font-size:22px; line-height:1.4">Mantener un solo escritor y copiarlo a todas partes. Postgres replica los datos solo; nuestro código solo mantiene el Redis de cada región al día con su propia réplica.</p></div>
-    </div>
-    <div class="stack grow" style="gap:14px; justify-content:center">
-      <div class="card focus"><span class="k">Región de escritura</span><span class="v">Primario de Postgres, job de snapshots del filtro</span><span class="small">Recibe cada INSERT, UPDATE y DELETE.</span></div>
-      <div class="card"><span class="k">Cada una de las 5 regiones de lectura</span><span class="v">App, réplica de Postgres, Redis, cache sync</span><span class="small">Sirve redirecciones localmente. Manda las escrituras al primario.</span></div>
-    </div>
-  </div>
+  <h2>Nuestra versión</h2>
+  <table class="t" style="font-size:22px">
+    <tr><th>OpenAI</th><th>Nosotros</th></tr>
+    <tr><td>1 primario</td><td>1 primario, en la región de escritura</td></tr>
+    <tr><td>~50 réplicas</td><td>5 regiones de lectura, cada una con app, réplica de Postgres y Redis</td></tr>
+    <tr><td>Caché adelante</td><td>Un Redis por región, al día con su propia réplica</td></tr>
+    <tr><td>Cosmos DB para muchas escrituras</td><td>No hace falta: ~40 escrituras/s entran en un primario</td></tr>
+  </table>
+  <p class="lead mt-auto">Las redirecciones se sirven en la región más cercana. Las escrituras viajan al primario, y Postgres las replica solo.</p>
 </section>
 
 <section class="slide diagram">
   <div class="top"><span>5 · Diagrama · las regiones</span><span class="n"></span></div>
   <figure><img src="../diagrams/tier-5-regions.svg" alt="Regiones del Nivel 5"></figure>
   <div class="cap"><span>Un escritor, cinco regiones de lectura, y los snapshots que cada región restaura.</span><span class="src">tier-5-regions.svg</span></div>
-</section>
-
-<section class="slide diagram">
-  <div class="top"><span>5 · Diagrama · dentro de una región de lectura · desplazar a los lados</span><span class="n"></span></div>
-  <figure class="pan"><img src="../diagrams/tier-5-region.svg" alt="Dentro de una región de lectura"></figure>
-  <div class="cap"><span>Las lecturas quedan en la región. Redis sigue a su propia réplica, nunca al primario.</span><span class="src">tier-5-region.svg</span></div>
-</section>
-
-<section class="slide diagram">
-  <div class="top"><span>5 · Diagrama · el flujo de escritura · desplazar a los lados</span><span class="n"></span></div>
-  <figure class="pan"><img src="../diagrams/tier-5-writes.svg" alt="El flujo de escritura"></figure>
-  <div class="cap"><span>Los pasos 4 y 5 corren solo para links nuevos.</span><span class="src">tier-5-writes.svg</span></div>
 </section>
 
 <section class="slide">
@@ -1035,81 +978,6 @@ while let Some(event) = changes.recv().await? {
       <div class="step point"><b>Las ediciones no mandan DEL desde el handler</b><span>La réplica todavía estaría atrasada. La regla: cada cambio llega a cada región poco después de su commit.</span></div>
     </div>
   </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · Teoría · replicación</span><span class="n"></span></div>
-  <h2>Dos tipos de replicación, los dos desde el WAL</h2>
-  <div class="cols grow">
-    <div class="card" style="gap:14px"><span class="k">Física · streaming</span><span class="v">Primario → réplica</span>
-      <span class="small">Envía los bytes del WAL. La réplica los reproduce y se vuelve una copia exacta, de solo lectura, de toda la base.</span>
-      <span class="small">Acá se usa para copiar <code>links</code> a cada región. Sin código nuestro.</span></div>
-    <div class="card focus" style="gap:14px"><span class="k">Lógica · decodificación</span><span class="v">Réplica → cache sync</span>
-      <span class="small">Decodifica el WAL en cambios de filas, a través de un slot, como en 4.4. Lo puede leer cualquier programa.</span>
-      <span class="small">Corre en la réplica misma. Requiere Postgres 16, <code>wal_level=logical</code> en el primario y <code>hot_standby_feedback=on</code> en la réplica.</span></div>
-  </div>
-  <p class="lead">Sin <code>hot_standby_feedback</code>, el primario puede limpiar filas que el slot todavía necesita, y Postgres invalida el slot.</p>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · Teoría · cache sync</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>¿Por qué leer la réplica local y no el primario?</h2>
-    <p class="lead">Un cambio llega a cache sync solo después de que la réplica de la región lo reprodujo. Así cada <code>DEL</code> llega cuando el valor nuevo ya se puede leer ahí.</p>
-  </div>
-  <div class="cols" style="--n:2; gap:20px">
-    <div class="card"><span class="k">Leyendo el primario · Carrera 1</span><span class="small">El <code>DEL</code> llega mientras la réplica todavía tiene la URL vieja. Un lector no la encuentra, consulta la réplica y vuelve a cachear la URL vieja. La nota de 4.3 no ayuda: la réplica misma está atrasada.</span></div>
-    <div class="card focus"><span class="k">Leyendo la réplica local · cerrada</span><span class="small">El <code>DEL</code> no puede adelantarse a los datos. Un lector que vuelve a llenar el caché obtiene la URL nueva. mcsqueal de Facebook lee el log local de cada región por la misma razón.</span></div>
-  </div>
-  <table class="t tight mt-auto">
-    <tr><th>Cambio</th><th>Cache sync hace</th></tr>
-    <tr><td><code>INSERT</code></td><td><code>BF.INSERT code</code> en el filtro de la región</td></tr>
-    <tr><td><code>UPDATE</code>, <code>DELETE</code></td><td><code>DEL code</code>, reintentado hasta que Redis acepta</td></tr>
-  </table>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · Teoría · LSN</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>Esperar a la réplica</h2>
-    <p class="lead">Un LSN es una posición en el WAL, como un offset en bytes. Comparar dos dice si una réplica ya se puso al día.</p>
-  </div>
-  <div class="stack" style="gap:10px">
-    <div class="cells"><div class="on">0/3A0</div><div class="on">0/3A8</div><div class="on">0/3B0</div><div class="on ring">0/3B8</div><div class="edge">0/3C0 ← INSERT confirmado</div></div>
-    <div style="display:flex; font-family:var(--mono); font-size:14px"><span style="flex:4; color:var(--teal)">▲ la réplica reprodujo hasta acá</span><span style="flex:1; color:var(--amber); text-align:right">objetivo</span></div>
-  </div>
-  <div class="cols mt-auto" style="--n:3">
-    <div class="point"><b>1 · En el primario</b><span><code>INSERT</code>, luego <code>pg_current_wal_lsn()</code>: la posición a alcanzar.</span></div>
-    <div class="point"><b>2 · En la réplica local</b><span>Consultar <code>pg_last_wal_replay_lsn()</code> cada pocos ms hasta alcanzarla, con un timeout.</span></div>
-    <div class="point"><b>3 · Recién ahí responder</b><span><code>BF.INSERT</code> local, y devolver el link. Funciona al instante en esta región.</span></div>
-  </div>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · Teoría · filtros de Bloom por región</span><span class="n"></span></div>
-  <div class="stack">
-    <h2>Un filtro en cada región, nunca adelantado al primario</h2>
-    <p class="lead">Agregar solo prende bits, y nada los apaga. El handler agrega un código recién después de que volvió su commit, así que un <code>BF.INSERT</code> duplicado no cambia nada.</p>
-  </div>
-  <div class="cols" style="--n:3; gap:20px">
-    <div class="card"><span class="k">1 · Al arrancar</span><span class="v">Restaurar el snapshot</span><span class="small">Desde el bucket, que todas las regiones pueden leer.</span></div>
-    <div class="card"><span class="k">2 · Ponerse al día</span><span class="v">Recorrer la réplica local</span><span class="small">Por <code>created_at</code>, como en 4.2.</span></div>
-    <div class="card focus"><span class="k">3 · Stream</span><span class="v">Desde el slot de cache sync</span><span class="small">Cada <code>INSERT</code> nuevo, a medida que se reproduce.</span></div>
-  </div>
-  <p class="lead mt-auto"><span class="hl">Orden:</span> una región nueva crea su slot <b>antes</b> del paso 2. Si no, un código insertado entre el recorrido y el slot nunca llega a su filtro. Que se superpongan no hace daño.</p>
-</section>
-
-<section class="slide">
-  <div class="top"><span>5 · Qué cambia para el cliente</span><span class="n"></span></div>
-  <h2>Lecturas más rápidas, escrituras más lentas</h2>
-  <table class="t">
-    <tr><th>Pedido</th><th>Nivel 4.4</th><th>Nivel 5</th></tr>
-    <tr class="on"><td>Redirección</td><td>Un viaje a la única región</td><td>Se sirve en la región más cercana</td></tr>
-    <tr><td>Redirección justo después de editar</td><td>URL nueva</td><td>URL vieja durante el retraso de la réplica más el de cache sync</td></tr>
-    <tr><td>Redirección justo después de crear</td><td>Funciona</td><td>Funciona en la misma región; 404 por un momento en las otras</td></tr>
-    <tr><td><code>POST /shorten</code></td><td>Un viaje</td><td>Entre regiones, más la espera a la réplica local</td></tr>
-    <tr><td><code>PATCH</code>, <code>DELETE</code></td><td>Un viaje</td><td>Entre regiones</td></tr>
-  </table>
 </section>
 
 <section class="slide">
@@ -1144,7 +1012,7 @@ while let Some(event) = changes.recv().await? {
     <tr><td>3</td><td>Postgres</td><td>Los reinicios</td></tr>
     <tr><td>4.1</td><td>Cache-aside, TTL, <code>DEL</code></td><td>Una consulta por redirección</td></tr>
     <tr><td>4.2</td><td>Filtro de Bloom</td><td>Consultas por códigos inexistentes</td></tr>
-    <tr><td>4.3</td><td>Una nota en la clave</td><td>Estampidas y stale sets</td></tr>
+    <tr><td>4.3</td><td>Sistema de leases</td><td>Estampidas y stale sets</td></tr>
     <tr><td>4.4</td><td>Invalidaciones desde el WAL</td><td>Los <code>DEL</code> perdidos</td></tr>
     <tr class="on"><td>5</td><td>Regiones de lectura</td><td>La distancia, y la Carrera 1</td></tr>
   </table>
@@ -1184,6 +1052,6 @@ while let Some(event) = changes.recv().await? {
 <div class="progress"></div>
 <div class="lightbox"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="deck.js?v=3"></script>
+<script src="deck.js?v=4"></script>
 </body>
 </html>

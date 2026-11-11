@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Fires repeated concurrent bursts at the same code on two running app
+# Fires repeated concurrent bursts at several codes on two running app
 # instances -- tier-4.1-caching (no coordination) and tier-4.3-caching (a
-# note in the key) -- after clearing that code's cache entry each time, to simulate a
-# TTL lapsing under sustained load. Watch the Grafana dashboard at
+# lease in the key) -- after clearing those codes' cache entries each time, to
+# simulate TTLs lapsing under sustained load. Watch the Grafana dashboard at
 # http://localhost:3001 while this runs.
 #
 # Assumes:
@@ -16,46 +16,55 @@ TIER_43_URL="${TIER_43_URL:-http://localhost:3002}"
 TIER_41_REDIS_CONTAINER="${TIER_41_REDIS_CONTAINER:-tier-41-caching-redis-1}"
 TIER_43_REDIS_CONTAINER="${TIER_43_REDIS_CONTAINER:-tier-43-caching-redis-1}"
 
-BURST_SIZE="${BURST_SIZE:-50}"
-BURST_COUNT="${BURST_COUNT:-10}"
-BURST_INTERVAL_SECONDS="${BURST_INTERVAL_SECONDS:-6}"
+KEYS="${KEYS:-20}"                 # codes per tier, each a cold key in every burst
+BURST_SIZE="${BURST_SIZE:-100}"    # concurrent requests per code (curl caps one process at 300)
+BURST_COUNT="${BURST_COUNT:-5}"
+BURST_INTERVAL_SECONDS="${BURST_INTERVAL_SECONDS:-8}"
 
-mint_code() {
+# Each request is a socket on both ends; macOS shells often default to 256.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || ulimit -n 10240
+
+mint_codes() {
   local base_url="$1"
-  curl -s -X POST "$base_url/shorten" \
-    -H 'content-type: application/json' \
-    -d '{"url":"https://example.com/thundering-herd-demo"}' \
-    | jq -r .code
+  for _ in $(seq 1 "$KEYS"); do
+    curl -sf -X POST "$base_url/shorten" \
+      -H 'content-type: application/json' \
+      -d '{"url":"https://example.com/thundering-herd-demo"}' \
+      | jq -r .code
+  done
 }
 
+# One curl process per code, holding BURST_SIZE connections open at once.
 fire_burst() {
-  local base_url="$1" code="$2" n="$3"
-  for _ in $(seq 1 "$n"); do
-    curl -s -o /dev/null "$base_url/$code" &
+  local base_url="$1"; shift
+  for code in "$@"; do
+    yes "url = \"$base_url/$code\"
+output = \"/dev/null\"" | head -n $((BURST_SIZE * 2)) \
+      | curl -s -Z --parallel-immediate --parallel-max "$BURST_SIZE" -K - &
   done
   wait
 }
 
-echo "Minting a code on each tier..."
-CODE_41=$(mint_code "$TIER_41_URL")
-CODE_43=$(mint_code "$TIER_43_URL")
-echo "  tier-4.1 code: $CODE_41"
-echo "  tier-4.3 code: $CODE_43"
+echo "Minting $KEYS codes on each tier..."
+CODES_41=($(mint_codes "$TIER_41_URL"))
+CODES_43=($(mint_codes "$TIER_43_URL"))
 
-echo "Firing $BURST_COUNT bursts of $BURST_SIZE concurrent requests, every ${BURST_INTERVAL_SECONDS}s..."
-echo "(open http://localhost:3001 now if you haven't already)"
+TOTAL=$((KEYS * BURST_SIZE))
+echo "Firing $BURST_COUNT bursts of $TOTAL concurrent requests per tier"
+echo "($KEYS keys x $BURST_SIZE), every ${BURST_INTERVAL_SECONDS}s..."
+echo "(open http://localhost:3001/d/thundering-herd now if you haven't already)"
 
 for i in $(seq 1 "$BURST_COUNT"); do
   echo "burst $i/$BURST_COUNT: clearing cache on both tiers, then firing..."
-  docker exec "$TIER_41_REDIS_CONTAINER" redis-cli DEL "$CODE_41" > /dev/null
-  docker exec "$TIER_43_REDIS_CONTAINER" redis-cli DEL "$CODE_43" > /dev/null
+  docker exec "$TIER_41_REDIS_CONTAINER" redis-cli DEL "${CODES_41[@]}" > /dev/null
+  docker exec "$TIER_43_REDIS_CONTAINER" redis-cli DEL "${CODES_43[@]}" > /dev/null
 
-  fire_burst "$TIER_41_URL" "$CODE_41" "$BURST_SIZE" &
-  fire_burst "$TIER_43_URL" "$CODE_43" "$BURST_SIZE" &
+  fire_burst "$TIER_41_URL" "${CODES_41[@]}" &
+  fire_burst "$TIER_43_URL" "${CODES_43[@]}" &
   wait
 
   sleep "$BURST_INTERVAL_SECONDS"
 done
 
-echo "Done. Tier 4.1's postgres_queries_total should have grown by roughly"
-echo "$BURST_SIZE per burst; Tier 4.3's should have grown by roughly 1."
+echo "Done. Per burst, Tier 4.1's postgres_queries_total should grow by about"
+echo "$TOTAL (one per request), and Tier 4.3's by about $KEYS (one per key)."

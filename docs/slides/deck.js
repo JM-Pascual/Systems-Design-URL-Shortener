@@ -1,4 +1,4 @@
-// Navigation: arrows, space, PageUp/PageDown, Home/End, or click the right/left half.
+// Navigation: arrows, space, PageUp/PageDown, Home/End. Clicks never change the slide.
 // The slide number lives in the URL hash, so a reload or a shared link keeps its place.
 const slides = [...document.querySelectorAll('.slide')];
 const tiers = ['0', '1', '2', '3', '4.1', '4.2', '4.3', '4.4', '5'];
@@ -66,10 +66,7 @@ addEventListener('click', (e) => {
     lightbox.classList.add('open');
     return;
   }
-  if (e.target.closest('.lightbox')) return lightbox.classList.remove('open');
-  if (e.target.closest('a, figure.scroll, figure.pan')) return;
-  if (e.clientX > innerWidth / 2) forward();
-  else back();
+  if (e.target.closest('.lightbox')) lightbox.classList.remove('open');
 });
 
 // A mouse wheel pans a wide diagram sideways.
